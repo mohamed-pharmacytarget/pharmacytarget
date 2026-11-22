@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS preferred_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   price REAL NOT NULL DEFAULT 0,
+  category TEXT NOT NULL DEFAULT '',
   active INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS sheet_uploads (
@@ -99,11 +100,21 @@ function reopenDb() {
   if (db) { try { db.close(); } catch (e) { /* ignore */ } db = null; }
   db = new DatabaseSync(DB_PATH);
   db.exec(SCHEMA);
+  migrateDb();
   seed();
 }
 
 db = new DatabaseSync(DB_PATH);
 db.exec(SCHEMA);
+migrateDb();
+
+// Migrations for DBs created before a column existed.
+function migrateDb() {
+  try {
+    const cols = db.prepare("PRAGMA table_info(preferred_items)").all().map(c => c.name);
+    if (!cols.includes('category')) db.exec("ALTER TABLE preferred_items ADD COLUMN category TEXT NOT NULL DEFAULT ''");
+  } catch (e) { console.error('migrate failed', e); }
+}
 
 // ---------- Seed (first run only) ----------
 function seed() {
@@ -192,6 +203,7 @@ async function syncFromBlob({ force = false } = {}) {
     fs.renameSync(tmp, DB_PATH);
     db = new DatabaseSync(DB_PATH);
     db.exec(SCHEMA);
+    migrateDb();
     seed();
     lastBlobUploadedAt = uploadedAt;
     return true;
@@ -515,16 +527,64 @@ app.get('/api/export.csv', requireAuth, (req, res) => {
   res.send('\ufeff' + csv);
 });
 
+// ---------- Sheet uploads (Excel / CSV) ----------
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// Read an uploaded Excel/CSV file. CSV must be decoded as UTF-8 explicitly:
+// XLSX.read on a raw buffer mis-decodes Arabic headers as latin1.
+function readSheetBuffer(buffer, filename) {
+  if (/\.csv$/i.test(filename || '')) {
+    return XLSX.read(buffer.toString('utf8').replace(/^\uFEFF/, ''), { type: 'string' });
+  }
+  return XLSX.read(buffer, { type: 'buffer' });
+}
+
 // ---------- Preferred List ----------
 app.get('/api/preferred', requireAuth, (req, res) => {
-  res.json(db.prepare('SELECT * FROM preferred_items WHERE active=1 ORDER BY name').all());
+  res.json(db.prepare("SELECT * FROM preferred_items WHERE active=1 ORDER BY CASE WHEN category='' THEN 1 ELSE 0 END, category, name").all());
 });
 app.post('/api/preferred', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
-  const { name, price } = req.body || {};
+  const { name, price, category } = req.body || {};
   if (!name) return res.status(400).json({ error: 'اسم الصنف مطلوب' });
-  const r = db.prepare('INSERT INTO preferred_items (name, price) VALUES (?, ?)').run(name, Number(price) || 0);
+  const r = db.prepare('INSERT INTO preferred_items (name, price, category) VALUES (?, ?, ?)').run(name, Number(price) || 0, String(category || '').trim());
   audit(me(req).username, 'preferred_add', `إضافة صنف مفضل ${name}`);
   res.json({ ok: true, id: r.lastInsertRowid });
+});
+// Upload a Preferred Excel/CSV sheet: columns اسم الصنف / السعر / الفئة.
+// The app analyses the sheet and categorises items by الفئة.
+app.post('/api/preferred/upload', requireRole('owner', 'manager', 'superadmin'), upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'اختر ملف أكسيل أو CSV' });
+  let rows = [];
+  try {
+    const wb = readSheetBuffer(req.file.buffer, req.file.originalname);
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+  } catch (e) {
+    return res.status(400).json({ error: 'تعذر قراءة الملف' });
+  }
+  const norm = v => String(v ?? '').trim();
+  const num = v => { const n = Number(String(v ?? '').replace(/[^0-9.\-]/g, '')); return isNaN(n) ? 0 : n; };
+  const find = db.prepare('SELECT id FROM preferred_items WHERE name=? AND active=1');
+  const ins = db.prepare('INSERT INTO preferred_items (name, price, category) VALUES (?, ?, ?)');
+  const upd = db.prepare('UPDATE preferred_items SET price=?, category=? WHERE id=?');
+  const cats = {};
+  let added = 0, updated = 0, skipped = 0;
+  for (const row of rows) {
+    const keys = Object.keys(row);
+    const name = norm(row['الصنف'] || row['اسم الصنف'] || row['item'] || row['name'] || (keys.length ? row[keys[0]] : ''));
+    if (!name) { skipped++; continue; }
+    const price = num(row['السعر'] || row['price'] || row['سعر'] || 0);
+    const category = norm(row['الفئة'] || row['التصنيف'] || row['category'] || row['الفئة/التصنيف']) || 'بدون فئة';
+    const ex = find.get(name);
+    if (ex) { upd.run(price, category, ex.id); updated++; } else { ins.run(name, price, category); added++; }
+    const c = cats[category] || (cats[category] = { category, count: 0, total: 0 });
+    c.count++; c.total += price;
+  }
+  const categories = Object.values(cats).sort((a, b) => b.count - a.count);
+  db.prepare('INSERT INTO sheet_uploads (type, filename, employee_id, rows_json, uploaded_by) VALUES (?, ?, ?, ?, ?)')
+    .run('preferred', req.file.originalname, null, JSON.stringify(rows), me(req).username);
+  audit(me(req).username, 'preferred_upload', `رفع شيت Preferred ${req.file.originalname} (${added + updated} صنف في ${categories.length} فئة)`);
+  res.json({ ok: true, added, updated, skipped, total: added + updated, categories });
 });
 app.delete('/api/preferred/:id', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
   db.prepare('UPDATE preferred_items SET active=0 WHERE id=?').run(req.params.id);
@@ -560,14 +620,13 @@ app.get('/api/preferred/achievement', requireAuth, (req, res) => {
 });
 
 // ---------- Sheet uploads (Excel / CSV) ----------
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 app.post('/api/uploads', requireRole('owner', 'manager', 'superadmin'), upload.single('file'), (req, res) => {
   const type = req.body.type || 'sales'; // sales | items
   const employee_id = req.body.employee_id ? Number(req.body.employee_id) : null;
   if (!req.file) return res.status(400).json({ error: 'اختر ملف أكسيل أو CSV' });
   let rows = [];
   try {
-    const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const wb = readSheetBuffer(req.file.buffer, req.file.originalname);
     const ws = wb.Sheets[wb.SheetNames[0]];
     rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
   } catch (e) {
