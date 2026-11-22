@@ -209,18 +209,37 @@ async function renderReports(v) {
 async function renderPreferred(v) {
   const items = await api('/api/preferred');
   const ach = await api(`/api/preferred/achievement?month=${month}`);
+  const canEdit = ['owner', 'manager', 'superadmin'].includes(user.role);
+  const cats = [];
+  for (const i of items) { const c = i.category || 'بدون فئة'; if (!cats.find(x => x.name === c)) cats.push({ name: c, items: [] }); cats.find(x => x.name === c).items.push(i); }
   v.innerHTML = `<div class="card"><h2>Preferred List — ${month}</h2>
-    ${['owner', 'manager', 'superadmin'].includes(user.role) ? `
-    <form id="pref-form"><label>اسم الصنف <input id="pref-name" required></label><label>السعر <input id="pref-price" type="number" value="0"></label><button type="submit">إضافة صنف</button></form>` : ''}
-    <table><tr><th>الصنف</th><th>السعر</th>${['owner', 'manager', 'superadmin'].includes(user.role) ? '<th></th>' : ''}</tr>
-    ${items.map(i => `<tr><td>${i.name}</td><td>${fmt(i.price)}</td>${['owner', 'manager', 'superadmin'].includes(user.role) ? `<td><button class="danger" data-delpref="${i.id}">حذف</button></td>` : ''}</tr>`).join('')}
-    </table>
+    ${canEdit ? `
+    <form id="pref-form"><label>اسم الصنف <input id="pref-name" required></label><label>السعر <input id="pref-price" type="number" value="0"></label><label>الفئة <input id="pref-cat" placeholder="مثال: كوزمتكس"></label><button type="submit">إضافة صنف</button></form>
+    <form id="pref-up-form"><label>رفع شيت Preferred (Excel أو CSV) <input id="pref-up-file" type="file" accept=".xlsx,.xls,.csv" required></label><button type="submit">رفع وتحليل</button></form>
+    <p>أعمدة الشيت: اسم الصنف، السعر، الفئة — التطبيق يصنّف الأصناف حسب الفئة تلقائيًا، والصنف بلا فئة يروح «بدون فئة». لو الصنف موجود قبل كده بيتحدّث سعره وفئته.</p>
+    <div id="pref-up-result"></div>` : ''}
+    ${cats.map(c => `<h3>${c.name} — ${c.items.length} صنف — إجمالي ${fmt(c.items.reduce((s, i) => s + Number(i.price || 0), 0))} ج</h3>
+    <table><tr><th>الصنف</th><th>السعر</th>${canEdit ? '<th></th>' : ''}</tr>
+    ${c.items.map(i => `<tr><td>${i.name}</td><td>${fmt(i.price)}</td>${canEdit ? `<td><button class="danger" data-delpref="${i.id}">حذف</button></td>` : ''}</tr>`).join('')}
+    </table>`).join('') || '<p>لا توجد أصناف بعد.</p>'}
     <h3>إنجاز الموظفين من الـ Preferred</h3>
     <table><tr><th>الموظف</th><th>من التسجيل اليومي</th><th>من شيت الأصناف</th><th>الإجمالي</th></tr>
     ${ach.map(a => `<tr><td>${a.name}</td><td>${fmt(a.dailyPreferred)}</td><td>${fmt(a.sheetPreferred)}</td><td><b>${fmt(a.totalPreferred)}</b></td></tr>`).join('')}
     </table></div>`;
   const form = $('#pref-form');
-  if (form) form.addEventListener('submit', async (e) => { e.preventDefault(); await api('/api/preferred', { method: 'POST', body: JSON.stringify({ name: $('#pref-name').value, price: $('#pref-price').value }) }); render(); });
+  if (form) form.addEventListener('submit', async (e) => { e.preventDefault(); await api('/api/preferred', { method: 'POST', body: JSON.stringify({ name: $('#pref-name').value, price: $('#pref-price').value, category: $('#pref-cat').value }) }); render(); });
+  const upForm = $('#pref-up-form');
+  if (upForm) upForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData();
+    fd.append('file', $('#pref-up-file').files[0]);
+    const r = await fetch('/api/preferred/upload', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (!r.ok) { $('#pref-up-result').innerHTML = `<p class="error">${d.error}</p>`; return; }
+    $('#pref-up-result').innerHTML = `<div class="good"><b>تم رفع الشيت وتحليله: ${d.total} صنف في ${d.categories.length} فئة</b> (جديد: ${d.added} — محدّث: ${d.updated}${d.skipped ? ` — صفوف فاضية متخطاة: ${d.skipped}` : ''})<br>
+      ${d.categories.map(c => `${c.category}: ${c.count} صنف — إجمالي ${fmt(c.total)} ج`).join('<br>')}</div>`;
+    render();
+  });
   v.querySelectorAll('[data-delpref]').forEach(b => b.addEventListener('click', async () => { await api(`/api/preferred/${b.dataset.delpref}`, { method: 'DELETE' }); render(); }));
 }
 
@@ -236,7 +255,7 @@ function renderUploads(v) {
     <div id="up-result"></div>
     <h3>ملفات مرفوعة سابقًا</h3><div id="up-list"></div></div>`;
   api('/api/uploads').then(list => {
-    $('#up-list').innerHTML = list.length ? `<table><tr><th>الملف</th><th>النوع</th><th>رفعه</th><th>التاريخ</th></tr>${list.map(u => `<tr><td>${u.filename}</td><td>${u.type === 'sales' ? 'مبيعات شهري' : 'مبيعات أصناف'}</td><td>${u.uploaded_by}</td><td>${u.created_at}</td></tr>`).join('')}</table>` : '<p>لا توجد ملفات بعد.</p>';
+    $('#up-list').innerHTML = list.length ? `<table><tr><th>الملف</th><th>النوع</th><th>رفعه</th><th>التاريخ</th></tr>${list.map(u => `<tr><td>${u.filename}</td><td>${u.type === 'sales' ? 'مبيعات شهري' : u.type === 'preferred' ? 'شيت Preferred' : 'مبيعات أصناف'}</td><td>${u.uploaded_by}</td><td>${u.created_at}</td></tr>`).join('')}</table>` : '<p>لا توجد ملفات بعد.</p>';
   });
   $('#up-form').addEventListener('submit', async (e) => {
     e.preventDefault();
