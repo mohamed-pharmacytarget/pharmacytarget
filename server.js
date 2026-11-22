@@ -2,7 +2,7 @@
 // Node.js + Express + SQLite (node:sqlite) + bcryptjs
 // All passwords are hashed on the server. No password exists in frontend code.
 const express = require('express');
-const session = require('express-session');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const XLSX = require('xlsx');
@@ -11,14 +11,21 @@ const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
 const PORT = process.env.PORT || 3000;
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const IS_VERCEL = !!process.env.VERCEL;
+const DATA_DIR = process.env.DATA_DIR || (IS_VERCEL ? path.join('/tmp', 'pharmacytarget-data') : path.join(__dirname, 'data'));
 const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, 'pharmacytarget.db');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-let db = new DatabaseSync(DB_PATH);
+// Vercel Blob persistence (serverless only): the Blob store is connected to
+// the Vercel project, which sets BLOB_READ_WRITE_TOKEN automatically.
+const BLOB_PATHNAME = 'pharmacytarget-db/pharmacytarget.db.enc';
+const BLOB_TOKEN = process.env.BLOB_READ_WRITE_TOKEN || '';
+const blobEnabled = IS_VERCEL && !!BLOB_TOKEN;
+
+let db = null;
 
 // ---------- Schema ----------
-db.exec(`
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT UNIQUE NOT NULL,
@@ -86,14 +93,26 @@ CREATE TABLE IF NOT EXISTS audit_log (
   details TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-`);
+`;
+
+function reopenDb() {
+  if (db) { try { db.close(); } catch (e) { /* ignore */ } db = null; }
+  db = new DatabaseSync(DB_PATH);
+  db.exec(SCHEMA);
+  seed();
+}
+
+db = new DatabaseSync(DB_PATH);
+db.exec(SCHEMA);
 
 // ---------- Seed (first run only) ----------
 function seed() {
+  // Idempotent: two instances starting at once must not crash each other.
+  try {
   const count = db.prepare('SELECT COUNT(*) c FROM users').get().c;
   if (count > 0) return;
   const insertUser = db.prepare(
-    'INSERT INTO users (username, password_hash, role, name) VALUES (?, ?, ?, ?)');
+    'INSERT OR IGNORE INTO users (username, password_hash, role, name) VALUES (?, ?, ?, ?)');
   const users = [
     ['owner', '123456', 'owner', 'المالك'],
     ['manager', '123456', 'manager', 'مدير الفرع'],
@@ -110,10 +129,11 @@ function seed() {
   set.run('branch_delivery', '500');
   // Sample employees so the dashboards are usable immediately
   const insEmp = db.prepare(
-    'INSERT INTO employees (name, username, monthly_sales, monthly_invoices, monthly_coding, custom_items) VALUES (?, ?, ?, ?, ?, ?)');
+    'INSERT OR IGNORE INTO employees (name, username, monthly_sales, monthly_invoices, monthly_coding, custom_items) VALUES (?, ?, ?, ?, ?, ?)');
   insEmp.run('أحمد سامي', 'ahmed', 300000, 800, 150, JSON.stringify([{ name: 'مبيعات كوزمتكس', target: 20000 }]));
   insEmp.run('سارة علي', 'sara', 250000, 700, 120, JSON.stringify([]));
   console.log('Seeded accounts: owner, manager, employee, mohamed + branch targets.');
+  } catch (e) { console.error('seed skipped:', e.message); }
 }
 seed();
 
@@ -121,23 +141,153 @@ function audit(username, action, details) {
   try { db.prepare('INSERT INTO audit_log (username, action, details) VALUES (?, ?, ?)').run(username || '', action, details || ''); } catch (e) { /* ignore */ }
 }
 
+// ---------- Vercel Blob persistence (serverless only) ----------
+// Vercel's filesystem is ephemeral (/tmp only, per-instance), so the SQLite
+// file is synced to a private Vercel Blob store: reloaded when a newer
+// snapshot exists, uploaded (AES-256-GCM-encrypted, key derived from
+// SESSION_SECRET) after every mutation. Without a Blob token (local/Render)
+// the app simply uses the local SQLite file as before.
+let blobLib = null;
+async function getBlob() { if (!blobLib) blobLib = await import('@vercel/blob'); return blobLib; }
+function blobKey() {
+  return crypto.createHash('sha256')
+    .update(String(process.env.BLOB_ENCRYPTION_KEY || process.env.SESSION_SECRET || 'change-me-in-production'))
+    .digest();
+}
+function encryptBuf(buf) {
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', blobKey(), iv);
+  return Buffer.concat([iv, Buffer.concat([c.update(buf), c.final()]), c.getAuthTag()]);
+}
+function decryptBuf(buf) {
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(buf.length - 16);
+  const d = crypto.createDecipheriv('aes-256-gcm', blobKey(), iv);
+  d.setAuthTag(tag);
+  return Buffer.concat([d.update(buf.subarray(12, buf.length - 16)), d.final()]);
+}
+let blobChain = Promise.resolve();
+let lastBlobCheck = 0;
+let lastBlobUploadedAt = 0; // uploadedAt of the snapshot our local file matches
+function queueBlob(fn) { const p = blobChain.then(fn, fn); blobChain = p.catch(() => {}); return p; }
+async function syncFromBlob({ force = false } = {}) {
+  if (!blobEnabled) return false;
+  return queueBlob(async () => {
+    const now = Date.now();
+    if (!force && now - lastBlobCheck < 5000) return false;
+    lastBlobCheck = now;
+    const { list } = await getBlob();
+    const { blobs } = await list({ prefix: BLOB_PATHNAME, token: BLOB_TOKEN });
+    const blob = blobs && blobs[0];
+    if (!blob) return false;
+    const uploadedAt = new Date(blob.uploadedAt).getTime();
+    if (uploadedAt <= lastBlobUploadedAt) return false;
+    let res = await fetch(blob.url, { headers: { Authorization: `Bearer ${BLOB_TOKEN}` } });
+    if (!res.ok) res = await fetch(blob.url); // public-store fallback
+    if (!res.ok) throw new Error(`blob download failed: ${res.status}`);
+    const plain = decryptBuf(Buffer.from(await res.arrayBuffer()));
+    const tmp = DB_PATH + '.download';
+    fs.writeFileSync(tmp, plain);
+    if (db) { try { db.close(); } catch (e) { /* ignore */ } db = null; }
+    fs.renameSync(tmp, DB_PATH);
+    db = new DatabaseSync(DB_PATH);
+    db.exec(SCHEMA);
+    seed();
+    lastBlobUploadedAt = uploadedAt;
+    return true;
+  });
+}
+async function persistToBlob() {
+  if (!blobEnabled) return false;
+  return queueBlob(async () => {
+    try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch (e) { /* ignore */ }
+    const { put } = await getBlob();
+    const blob = await put(BLOB_PATHNAME, encryptBuf(fs.readFileSync(DB_PATH)),
+      { access: 'private', addRandomSuffix: false, allowOverwrite: true, token: BLOB_TOKEN });
+    lastBlobUploadedAt = new Date(blob.uploadedAt).getTime();
+    lastBlobCheck = Date.now();
+    return true;
+  });
+}
+
 // ---------- App ----------
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'change-me-in-production',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    maxAge: 1000 * 60 * 60 * 24 * 7,
-  },
-}));
+
+// Stateless signed-cookie sessions: express-session's MemoryStore does not
+// survive across Vercel serverless instances, so the session is an
+// HMAC-signed cookie (payload: id/username/role/name, 7-day expiry).
+const SESSION_COOKIE = 'pt_session';
+function sessionKey() {
+  return crypto.createHash('sha256')
+    .update(String(process.env.SESSION_SECRET || 'change-me-in-production')).digest();
+}
+function signSession(user) {
+  const payload = Buffer.from(JSON.stringify({
+    ...user, exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+  })).toString('base64url');
+  const sig = crypto.createHmac('sha256', sessionKey()).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+function verifySession(value) {
+  if (!value) return null;
+  const parts = value.split('.');
+  if (parts.length !== 2) return null;
+  const [payload, sig] = parts;
+  const expected = crypto.createHmac('sha256', sessionKey()).update(payload).digest('base64url');
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (data.exp < Date.now()) return null;
+    return { id: data.id, username: data.username, role: data.role, name: data.name };
+  } catch (e) { return null; }
+}
+function parseCookies(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+app.use((req, res, next) => {
+  const user = verifySession(parseCookies(req)[SESSION_COOKIE]);
+  req.session = user ? { user } : {};
+  req._setSessionUser = (u) => {
+    res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${signSession(u)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
+    req.session = { user: u };
+  };
+  req._clearSession = () => {
+    res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
+    req.session = {};
+  };
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Blob sync: reload a newer snapshot before any API call; persist after mutations.
+app.use('/api', async (req, res, next) => {
+  if (!blobEnabled) return next();
+  try {
+    const mutating = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method);
+    await syncFromBlob({ force: mutating });
+    if (mutating) {
+      const origJson = res.json.bind(res);
+      const origSend = res.send.bind(res);
+      let done = false;
+      const persistOnce = async () => {
+        if (done) return;
+        done = true;
+        try { await persistToBlob(); } catch (e) { console.error('blob persist failed', e); }
+      };
+      res.json = async function (body) { if (res.statusCode < 400) await persistOnce(); return origJson(body); };
+      res.send = async function (body) { if (res.statusCode < 400) await persistOnce(); return origSend(body); };
+    }
+  } catch (e) { console.error('blob sync failed', e); }
+  next();
+});
 
 const requireAuth = (req, res, next) => {
   if (!req.session.user) return res.status(401).json({ error: 'غير مسجل الدخول' });
@@ -206,12 +356,13 @@ app.post('/api/login', (req, res) => {
   if (!user || !bcrypt.compareSync(String(password), user.password_hash)) {
     return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
   }
-  req.session.user = { id: user.id, username: user.username, role: user.role, name: user.name };
+  req._setSessionUser({ id: user.id, username: user.username, role: user.role, name: user.name });
   audit(user.username, 'login', 'تسجيل دخول');
   res.json({ ok: true, user: req.session.user });
 });
 app.post('/api/logout', (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+  req._clearSession();
+  res.json({ ok: true });
 });
 app.get('/api/me', requireAuth, (req, res) => res.json({ user: me(req) }));
 app.get('/api/health', (req, res) => res.json({ ok: true }));
@@ -490,14 +641,16 @@ app.get('/api/audit', requireRole('owner', 'manager', 'superadmin'), (req, res) 
   res.json(db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 200').all());
 });
 app.get('/api/backup', requireRole('owner', 'superadmin'), (req, res) => {
-  db.close();
-  res.download(DB_PATH, 'pharmacytarget-backup.db', () => { db = new DatabaseSync(DB_PATH); });
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', 'attachment; filename="pharmacytarget-backup.db"');
+  res.send(fs.readFileSync(DB_PATH));
 });
 app.post('/api/restore', requireRole('superadmin'), upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'اختر ملف قاعدة البيانات' });
-  db.close();
+  if (db) { try { db.close(); } catch (e) { /* ignore */ } db = null; }
   fs.writeFileSync(DB_PATH, req.file.buffer);
   db = new DatabaseSync(DB_PATH);
+  db.exec(SCHEMA);
   audit(me(req).username, 'restore', 'استعادة نسخة احتياطية');
   res.json({ ok: true, note: 'تمت الاستعادة — سجل الدخول مرة أخرى' });
 });
@@ -507,7 +660,12 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`PharmacyTarget running on http://localhost:${PORT}`);
-  console.log(`Database: ${DB_PATH}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`PharmacyTarget running on http://localhost:${PORT}`);
+    console.log(`Database: ${DB_PATH}`);
+    if (blobEnabled) console.log('Blob persistence: enabled (private store, encrypted snapshot)');
+  });
+}
+
+module.exports = app;

@@ -1,0 +1,1 @@
+{"$schema":"https://json.schemastore.org/vercel.json","functions":{"api/index.js":{"maxDuration":30}},"rewrites":[{"destination":"/api/index","source":"/(.*)"}]}
