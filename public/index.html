@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dr Mohamed - PharmacyTarget</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="verse">
+  <div class="verse-text">وَمَن يَتَّقِ اللَّهَ يَجْعَل لَّهُ مَخْرَجًا وَيَرْزُقْهُ مِنْ حَيْثُ لَا يَحْتَسِبُ</div>
+</header>
+<main id="app">
+  <div class="card" id="login-card">
+    <h1>Dr Mohamed - PharmacyTarget</h1>
+    <p class="muted">نظام إدارة أهداف وأداء الصيدلية</p>
+    <form id="login-form">
+      <label>اسم المستخدم <input id="username" autocomplete="username" required></label>
+      <label>كلمة المرور <input id="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">دخول</button>
+      <p id="login-error" class="error"></p>
+    </form>
+    <p class="muted small">الدخول بحسابك الخاص. البيانات متزامنة بين كل الأجهزة لأنها محفوظة على الخادم.</p>
+  </div>
+  <div id="dashboard" hidden>
+    <div class="topbar">
+      <span id="who"></span>
+      <button id="logout-btn" class="secondary">تسجيل الخروج</button>
+    </div>
+    <nav id="tabs"></nav>
+    <section id="view"></section>
+  </div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

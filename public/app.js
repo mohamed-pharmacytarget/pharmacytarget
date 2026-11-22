@@ -1,0 +1,358 @@
+// PharmacyTarget frontend — no passwords anywhere in this file.
+// All login checks happen on the server; this file only calls the API.
+const $ = (s) => document.querySelector(s);
+const api = async (path, opts = {}) => {
+  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || 'حدث خطأ');
+  return data;
+};
+const today = () => new Date().toISOString().slice(0, 10);
+const thisMonth = () => new Date().toISOString().slice(0, 7);
+const fmt = (n) => Number(n || 0).toLocaleString('en-US');
+
+let user = null;
+let employees = [];
+let settings = {};
+let month = thisMonth();
+let selectedEmployeeId = null;
+let tab = 'dashboard';
+
+// ---------- Login ----------
+$('#login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('#login-error').textContent = '';
+  try {
+    const d = await api('/api/login', { method: 'POST', body: JSON.stringify({ username: $('#username').value.trim(), password: $('#password').value }) });
+    user = d.user;
+    $('#login-card').hidden = true;
+    $('#dashboard').hidden = false;
+    $('#who').textContent = `${user.name} — ${roleName(user.role)}`;
+    await loadAll();
+    renderTabs();
+    render();
+  } catch (err) { $('#login-error').textContent = err.message; }
+});
+$('#logout-btn').addEventListener('click', async () => {
+  await api('/api/logout', { method: 'POST' }).catch(() => {});
+  location.reload();
+});
+function roleName(r) { return { owner: 'المالك', manager: 'مدير الفرع', employee: 'موظف', superadmin: 'Mohamed — كل الصلاحيات' }[r] || r; }
+
+async function loadAll() {
+  employees = await api('/api/employees');
+  settings = await api('/api/settings');
+  if (!selectedEmployeeId && employees.length) selectedEmployeeId = employees[0].id;
+}
+
+function renderTabs() {
+  const tabs = [['dashboard', 'لوحة التحكم']];
+  if (['owner', 'manager', 'superadmin'].includes(user.role)) {
+    tabs.push(['employees', 'إدارة الموظفين'], ['reports', 'تقارير'], ['preferred', 'Preferred List'], ['uploads', 'رفع تقارير أكسيل'], ['audit', 'سجل التعديلات']);
+  }
+  if (user.role === 'employee') tabs.push(['myday', 'تسجيل نتائج اليوم']);
+  if (user.role === 'superadmin') tabs.push(['mohamed', 'لوحة Mohamed']);
+  tabs.push(['catalog', 'كتالوج التشغيل']);
+  $('#tabs').innerHTML = tabs.map(([id, label]) =>
+    `<button data-tab="${id}" class="${tab === id ? 'active' : ''}">${label}</button>`).join('');
+  $('#tabs').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { tab = b.dataset.tab; renderTabs(); render(); }));
+}
+
+async function render() {
+  const v = $('#view');
+  if (tab === 'dashboard') return renderDashboard(v);
+  if (tab === 'employees') return renderEmployees(v);
+  if (tab === 'reports') return renderReports(v);
+  if (tab === 'preferred') return renderPreferred(v);
+  if (tab === 'uploads') return renderUploads(v);
+  if (tab === 'audit') return renderAudit(v);
+  if (tab === 'myday') return renderMyDay(v);
+  if (tab === 'mohamed') return renderMohamed(v);
+  if (tab === 'catalog') return renderCatalog(v);
+}
+
+// ---------- Dashboard ----------
+async function renderDashboard(v) {
+  const monthInput = `<label>الشهر <input type="month" id="month-pick" value="${month}"></label>`;
+  if (user.role === 'employee') {
+    v.innerHTML = `<div class="card">${monthInput}
+      <label>اختر اسمك <select id="emp-pick">${employees.map(e => `<option value="${e.id}" ${e.id === selectedEmployeeId ? 'selected' : ''}>${e.name}</option>`).join('')}</select></label>
+      <div id="emp-stats"></div><div id="emp-coach"></div></div>`;
+    $('#month-pick').addEventListener('change', (e) => { month = e.target.value; render(); });
+    $('#emp-pick').addEventListener('change', (e) => { selectedEmployeeId = Number(e.target.value); render(); });
+    await renderEmployeeStats($('#emp-stats'), selectedEmployeeId);
+    const coach = await api(`/api/coach/${selectedEmployeeId}?month=${month}`);
+    $('#emp-coach').innerHTML = `<h3>Smart Performance Coach</h3>` + coach.tips.map(t =>
+      `<div class="card"><b>${t.indicator}</b> — ${t.cause}<br>المطلوب: ${fmt(t.amount)}<br>اقتراح: ${t.suggestion}<br>الأثر المتوقع: ${t.expected}</div>`).join('');
+    return;
+  }
+  // owner / manager / superadmin
+  const rep = await api(`/api/reports/summary?month=${month}`);
+  v.innerHTML = `<div class="card">${monthInput}
+    <h2>تارجت الفرع — ${month}</h2>
+    <div class="grid">
+      <div class="stat">المبيعات<b>${fmt(rep.totals.sales)} / ${fmt(rep.settings.branch_sales)}</b>${Math.round(rep.totals.sales / rep.settings.branch_sales * 100)}%</div>
+      <div class="stat">الفواتير<b>${fmt(rep.totals.invoices)} / ${fmt(rep.settings.branch_invoices)}</b></div>
+      <div class="stat">التكويد<b>${fmt(rep.totals.coding)} / ${fmt(rep.settings.branch_coding)}</b></div>
+      <div class="stat">متوسط الفاتورة<b>${fmt(rep.avgInvoice)} ج</b></div>
+      <div class="stat">Preferred<b>${fmt(rep.totals.preferred)} ج</b></div>
+    </div>
+    <h3>الفريق</h3>
+    <table><tr><th>الموظف</th><th>المبيعات</th><th>الفواتير</th><th>التكويد</th><th>المؤشر</th><th>التصنيف</th></tr>
+    ${rep.perEmployee.map(e => `<tr><td>${e.name}</td><td>${fmt(e.achieved.sales)} / ${fmt(e.target.sales)}</td><td>${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)}</td><td>${fmt(e.achieved.coding)} / ${fmt(e.target.coding)}</td><td>${e.index}%</td><td><span class="badge">${e.classification}</span></td></tr>`).join('')}
+    </table>
+    <h3>تنبيهات</h3>
+    ${rep.problems.length ? rep.problems.map(p => `<div class="problem"><b>${p.problem}</b><br>السبب: ${p.cause}<br>الحل: ${p.solution}</div>`).join('') : '<p class="ok">لا توجد مشاكل ظاهرة — الأداء على المسار الصحيح.</p>'}
+    <h3>تعديل تارجت الفرع</h3>
+    <label>مبيعات <input id="s-sales" type="number" value="${rep.settings.branch_sales}"></label>
+    <label>فواتير <input id="s-inv" type="number" value="${rep.settings.branch_invoices}"></label>
+    <label>تكويد <input id="s-cod" type="number" value="${rep.settings.branch_coding}"></label>
+    <label>توصيل <input id="s-del" type="number" value="${rep.settings.branch_delivery}"></label>
+    <button id="save-settings">حفظ تارجت الفرع</button> <span id="settings-msg"></span>
+    <p><a href="/api/export.csv?month=${month}">تحميل التقرير CSV</a> &nbsp; <a href="/api/backup">تحميل نسخة احتياطية</a></p>
+    </div>`;
+  $('#month-pick').addEventListener('change', (e) => { month = e.target.value; render(); });
+  $('#save-settings').addEventListener('click', async () => {
+    await api('/api/settings', { method: 'PUT', body: JSON.stringify({ branch_sales: $('#s-sales').value, branch_invoices: $('#s-inv').value, branch_coding: $('#s-cod').value, branch_delivery: $('#s-del').value }) });
+    $('#settings-msg').textContent = 'تم الحفظ';
+    await loadAll(); render();
+  });
+}
+
+async function renderEmployeeStats(el, empId) {
+  const rep = await api(`/api/reports/summary?month=${month}`);
+  const e = rep.perEmployee.find(x => x.id === empId);
+  if (!e) { el.innerHTML = '<p>لا يوجد موظف بعد.</p>'; return; }
+  const daily = await api(`/api/daily?employee_id=${empId}&month=${month}`);
+  const t = daily.find(d => d.date === today());
+  const pref = await api(`/api/preferred/achievement?month=${month}`);
+  const myPref = pref.find(p => p.employee_id === empId);
+  const daySales = t ? t.sales : 0, dayInv = t ? t.invoices : 0, dayCod = t ? t.coding : 0;
+  const ok = (a, b) => a >= b ? '✓ اتحقق' : '✗ لم يتحقق';
+  el.innerHTML = `
+    <h2>${e.name} — ${month}</h2>
+    <div class="grid">
+      <div class="stat">مبيعات الشهر<b>${fmt(e.achieved.sales)} / ${fmt(e.target.sales)}</b>${e.index}%</div>
+      <div class="stat">فواتير الشهر<b>${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)}</b></div>
+      <div class="stat">تكويد الشهر<b>${fmt(e.achieved.coding)} / ${fmt(e.target.coding)}</b></div>
+      <div class="stat">المطلوب اليوم — مبيعات<b>${fmt(e.dailyRequired.sales)} ج</b></div>
+      <div class="stat">المطلوب اليوم — فواتير<b>${fmt(e.dailyRequired.invoices)}</b></div>
+      <div class="stat">المطلوب اليوم — تكويد<b>${fmt(e.dailyRequired.coding)}</b></div>
+      <div class="stat">Preferred هذا الشهر<b>${fmt(myPref ? myPref.totalPreferred : 0)} ج</b></div>
+    </div>
+    <h3>تقرير نهاية اليوم (${today()})</h3>
+    <p>المبيعات: ${fmt(daySales)} / ${fmt(e.dailyRequired.sales)} — ${ok(daySales, e.dailyRequired.sales)}</p>
+    <p>الفواتير: ${fmt(dayInv)} / ${fmt(e.dailyRequired.invoices)} — ${ok(dayInv, e.dailyRequired.invoices)}</p>
+    <p>التكويد: ${fmt(dayCod)} / ${fmt(e.dailyRequired.coding)} — ${ok(dayCod, e.dailyRequired.coding)}</p>
+    <p><b>مطلوب الغد:</b> مبيعات ${fmt(e.tomorrow.sales)} جنيه (وباقي البنود بنفس طريقة الحساب من المتبقي الشهري ÷ الأيام المتبقية).</p>
+    ${e.custom_items.length ? `<h3>بنود خاصة بي</h3><ul>${e.custom_items.map(i => `<li>${i.name} — تارجت ${fmt(i.target)}</li>`).join('')}</ul>` : ''}`;
+}
+
+// ---------- Employees (Add Employee unified) ----------
+function renderEmployees(v) {
+  v.innerHTML = `<div class="card"><h2>Add Employee — إضافة موظف</h2>
+    <form id="add-emp">
+      <label>الاسم <input id="f-name" required></label>
+      <label>اسم المستخدم <input id="f-user" required></label>
+      <label>كلمة المرور <input id="f-pass" type="password" required></label>
+      <label>تارجت المبيعات الشهري <input id="f-sales" type="number" value="0"></label>
+      <label>تارجت عدد الفواتير الشهري <input id="f-inv" type="number" value="0"></label>
+      <label>تارجت التكويد الشهري <input id="f-cod" type="number" value="0"></label>
+      <h3>بنود خاصة بالموظف</h3>
+      <div id="custom-items"></div>
+      <button type="button" id="add-item" class="secondary">+ إضافة item</button>
+      <button type="submit">حفظ الموظف</button> <span id="emp-msg"></span>
+    </form></div>
+    <div class="card"><h3>الموظفون الحاليون</h3>
+    <table><tr><th>الاسم</th><th>اليوزر</th><th>مبيعات</th><th>فواتير</th><th>تكويد</th><th>بنود خاصة</th><th></th></tr>
+    ${employees.map(e => `<tr><td>${e.name}</td><td>${e.username}</td><td>${fmt(e.monthly_sales)}</td><td>${fmt(e.monthly_invoices)}</td><td>${fmt(e.monthly_coding)}</td><td>${e.custom_items.map(i => i.name).join('، ') || '—'}</td><td><button class="danger" data-del="${e.id}">حذف</button></td></tr>`).join('')}
+    </table></div>`;
+  const items = [];
+  const renderItems = () => {
+    $('#custom-items').innerHTML = items.map((it, i) => `<div><label>اسم البند <input data-i="${i}" data-f="name" value="${it.name}"></label><label>التارجت <input data-i="${i}" data-f="target" type="number" value="${it.target}"></label><button type="button" data-rm="${i}" class="danger">شيل البند</button></div>`).join('');
+    $('#custom-items').querySelectorAll('input').forEach(inp => inp.addEventListener('input', () => { items[Number(inp.dataset.i)][inp.dataset.f] = inp.dataset.f === 'target' ? Number(inp.value) : inp.value; }));
+    $('#custom-items').querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', () => { items.splice(Number(b.dataset.rm), 1); renderItems(); }));
+  };
+  $('#add-item').addEventListener('click', () => { items.push({ name: '', target: 0 }); renderItems(); });
+  renderItems();
+  $('#add-emp').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/employees', { method: 'POST', body: JSON.stringify({ name: $('#f-name').value, username: $('#f-user').value, password: $('#f-pass').value, monthly_sales: $('#f-sales').value, monthly_invoices: $('#f-inv').value, monthly_coding: $('#f-cod').value, custom_items: items }) });
+      $('#emp-msg').textContent = 'تمت إضافة الموظف';
+      await loadAll(); renderEmployees(v);
+    } catch (err) { $('#emp-msg').textContent = err.message; }
+  });
+  v.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('حذف هذا الموظف؟')) return;
+    await api(`/api/employees/${b.dataset.del}`, { method: 'DELETE' });
+    await loadAll(); renderEmployees(v);
+  }));
+}
+
+// ---------- Reports ----------
+async function renderReports(v) {
+  const rep = await api(`/api/reports/summary?month=${month}`);
+  v.innerHTML = `<div class="card"><h2>تقارير شهرية — ${month}</h2>
+    <label>الشهر <input type="month" id="month-pick" value="${month}"></label>
+    <p>إجمالي المبيعات: ${fmt(rep.totals.sales)} جنيه — الفواتير: ${fmt(rep.totals.invoices)} — متوسط الفاتورة: ${fmt(rep.avgInvoice)} جنيه — التكويد: ${fmt(rep.totals.coding)} — التوصيل: ${fmt(rep.totals.delivery)} — Preferred: ${fmt(rep.totals.preferred)} جنيه</p>
+    <table><tr><th>الموظف</th><th>مبيعات</th><th>فواتير</th><th>تكويد</th><th>Preferred</th><th>المؤشر</th><th>التصنيف</th></tr>
+    ${rep.perEmployee.map(e => `<tr><td>${e.name}</td><td>${fmt(e.achieved.sales)} / ${fmt(e.target.sales)}</td><td>${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)}</td><td>${fmt(e.achieved.coding)} / ${fmt(e.target.coding)}</td><td>${fmt(e.achieved.preferred)}</td><td>${e.index}%</td><td>${e.classification}</td></tr>`).join('')}
+    </table>
+    <h3>المشاكل الظاهرة في التقارير وحلولها</h3>
+    ${rep.problems.length ? rep.problems.map(p => `<div class="problem"><b>${p.problem}</b><br>السبب: ${p.cause}<br>الحل: ${p.solution}<br>مؤشر المتابعة: ${p.indicator}</div>`).join('') : '<p class="ok">لا توجد مشاكل ظاهرة هذا الشهر.</p>'}
+    <p><a href="/api/export.csv?month=${month}">تحميل التقرير CSV</a></p></div>`;
+  $('#month-pick').addEventListener('change', (e) => { month = e.target.value; render(); });
+}
+
+// ---------- Preferred ----------
+async function renderPreferred(v) {
+  const items = await api('/api/preferred');
+  const ach = await api(`/api/preferred/achievement?month=${month}`);
+  v.innerHTML = `<div class="card"><h2>Preferred List — ${month}</h2>
+    ${['owner', 'manager', 'superadmin'].includes(user.role) ? `
+    <form id="pref-form"><label>اسم الصنف <input id="pref-name" required></label><label>السعر <input id="pref-price" type="number" value="0"></label><button type="submit">إضافة صنف</button></form>` : ''}
+    <table><tr><th>الصنف</th><th>السعر</th>${['owner', 'manager', 'superadmin'].includes(user.role) ? '<th></th>' : ''}</tr>
+    ${items.map(i => `<tr><td>${i.name}</td><td>${fmt(i.price)}</td>${['owner', 'manager', 'superadmin'].includes(user.role) ? `<td><button class="danger" data-delpref="${i.id}">حذف</button></td>` : ''}</tr>`).join('')}
+    </table>
+    <h3>إنجاز الموظفين من الـ Preferred</h3>
+    <table><tr><th>الموظف</th><th>من التسجيل اليومي</th><th>من شيت الأصناف</th><th>الإجمالي</th></tr>
+    ${ach.map(a => `<tr><td>${a.name}</td><td>${fmt(a.dailyPreferred)}</td><td>${fmt(a.sheetPreferred)}</td><td><b>${fmt(a.totalPreferred)}</b></td></tr>`).join('')}
+    </table></div>`;
+  const form = $('#pref-form');
+  if (form) form.addEventListener('submit', async (e) => { e.preventDefault(); await api('/api/preferred', { method: 'POST', body: JSON.stringify({ name: $('#pref-name').value, price: $('#pref-price').value }) }); render(); });
+  v.querySelectorAll('[data-delpref]').forEach(b => b.addEventListener('click', async () => { await api(`/api/preferred/${b.dataset.delpref}`, { method: 'DELETE' }); render(); }));
+}
+
+// ---------- Uploads ----------
+function renderUploads(v) {
+  v.innerHTML = `<div class="card"><h2>رفع تقارير أكسيل</h2>
+    <p>اسحب تقرير المبيعات الشهري أو تقرير مبيعات الأصناف من تطبيق الصيدلية وارفعه هنا (Excel أو CSV). التطبيق يحلل الشيت ويقول حققنا ولا لأ.</p>
+    <form id="up-form">
+      <label>نوع التقرير <select id="up-type"><option value="sales">تقرير مبيعات شهري</option><option value="items">تقرير مبيعات أصناف</option></select></label>
+      <label>الملف <input id="up-file" type="file" accept=".xlsx,.xls,.csv" required></label>
+      <button type="submit">رفع وتحليل</button>
+    </form>
+    <div id="up-result"></div>
+    <h3>ملفات مرفوعة سابقًا</h3><div id="up-list"></div></div>`;
+  api('/api/uploads').then(list => {
+    $('#up-list').innerHTML = list.length ? `<table><tr><th>الملف</th><th>النوع</th><th>رفعه</th><th>التاريخ</th></tr>${list.map(u => `<tr><td>${u.filename}</td><td>${u.type === 'sales' ? 'مبيعات شهري' : 'مبيعات أصناف'}</td><td>${u.uploaded_by}</td><td>${u.created_at}</td></tr>`).join('')}</table>` : '<p>لا توجد ملفات بعد.</p>';
+  });
+  $('#up-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData();
+    fd.append('file', $('#up-file').files[0]);
+    fd.append('type', $('#up-type').value);
+    const r = await fetch('/api/uploads', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (!r.ok) { $('#up-result').innerHTML = `<p class="error">${d.error}</p>`; return; }
+    const a = d.analysis;
+    $('#up-result').innerHTML = `<div class="${a.achieved ? 'good' : 'problem'}"><b>${a.verdict}</b><br>
+      إجمالي المبيعات في الشيت: ${fmt(a.totalSales)} جنيه — الفواتير: ${fmt(a.totalInvoices)} — التكويد: ${fmt(a.totalCoding)}<br>
+      نسبة تحقيق تارجت الفرع: ${a.branchSalesPct}%<br>
+      ${Object.entries(a.byEmployee).map(([n, x]) => `${n}: مبيعات ${fmt(x.sales)}، فواتير ${fmt(x.invoices)}، تكويد ${fmt(x.coding)}`).join('<br>')}
+      </div>`;
+  });
+}
+
+// ---------- Audit ----------
+async function renderAudit(v) {
+  const rows = await api('/api/audit');
+  v.innerHTML = `<div class="card"><h2>سجل التعديلات</h2>
+    <table><tr><th>الوقت</th><th>المستخدم</th><th>الإجراء</th><th>التفاصيل</th></tr>
+    ${rows.map(r => `<tr><td>${r.created_at}</td><td>${r.username}</td><td>${r.action}</td><td>${r.details || ''}</td></tr>`).join('')}
+    </table></div>`;
+}
+
+// ---------- Employee daily entry ----------
+async function renderMyDay(v) {
+  v.innerHTML = `<div class="card"><h2>تسجيل نتائج اليوم — بعد نهاية الشيفت</h2>
+    <label>اختر اسمك <select id="emp-pick">${employees.map(e => `<option value="${e.id}" ${e.id === selectedEmployeeId ? 'selected' : ''}>${e.name}</option>`).join('')}</select></label>
+    <form id="day-form">
+      <label>التاريخ <input id="d-date" type="date" value="${today()}" required></label>
+      <label>المبيعات (جنيه) <input id="d-sales" type="number" value="0"></label>
+      <label>عدد الفواتير <input id="d-inv" type="number" value="0"></label>
+      <label>التكويد <input id="d-cod" type="number" value="0"></label>
+      <label>التوصيل <input id="d-del" type="number" value="0"></label>
+      <label>قيمة Preferred اليوم (جنيه) <input id="d-pref" type="number" value="0"></label>
+      <button type="submit">حفظ نتائج اليوم</button> <span id="day-msg"></span>
+    </form>
+    <div id="day-report"></div></div>`;
+  $('#emp-pick').addEventListener('change', (e) => { selectedEmployeeId = Number(e.target.value); render(); });
+  const showReport = async () => { await renderEmployeeStats($('#day-report'), selectedEmployeeId); };
+  await showReport();
+  $('#day-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await api('/api/daily', { method: 'POST', body: JSON.stringify({ employee_id: selectedEmployeeId, date: $('#d-date').value, sales: $('#d-sales').value, invoices: $('#d-inv').value, coding: $('#d-cod').value, delivery: $('#d-del').value, preferred_value: $('#d-pref').value }) });
+    $('#day-msg').textContent = 'تم الحفظ — ظهرت النتائج في لوحة المدير فورًا';
+    await showReport();
+  });
+}
+
+// ---------- Mohamed superadmin ----------
+async function renderMohamed(v) {
+  const users = await api('/api/users');
+  const reqs = await api('/api/change-requests');
+  v.innerHTML = `<div class="card"><h2>لوحة Mohamed — كل الصلاحيات</h2>
+    <p class="muted">هذه اللوحة مخفية تمامًا عن المالك والمدير.</p>
+    <h3>كل المستخدمين</h3>
+    <table><tr><th>اليوزر</th><th>الاسم</th><th>الدور</th><th>نشط</th></tr>
+    ${users.map(u => `<tr><td>${u.username}</td><td>${u.name}</td><td>${u.role}</td><td>${u.active ? 'نعم' : 'لا'}</td></tr>`).join('')}
+    </table>
+    <h3>تغيير باسورد أي حساب</h3>
+    <form id="pw-form"><label>اليوزر <input id="pw-user" required></label><label>الباسورد الجديد <input id="pw-new" type="password" required></label><button type="submit">تغيير الباسورد</button> <span id="pw-msg"></span></form>
+    <h3>طلب تعديل جديد للتطبيق</h3>
+    <form id="cr-form"><label>التعديل المطلوب <textarea id="cr-text" rows="3" required></textarea></label><button type="submit">حفظ الطلب</button></form>
+    <button id="wa-btn" class="secondary">تواصل مع Muse من التطبيق</button>
+    <p class="small muted">الزرار بينسخ رسالة تبدأ بـ "أنا محمد، جاي من تطبيق PharmacyTarget" ويفتح واتساب لتبعتها.</p>
+    <h3>طلبات التعديل السابقة</h3>
+    ${reqs.length ? reqs.map(r => `<div class="card">${r.text} <span class="muted small">— ${r.username} — ${r.created_at}</span></div>`).join('') : '<p>لا توجد طلبات بعد.</p>'}
+    <h3>نسخ احتياطي / استعادة</h3>
+    <p><a href="/api/backup">تحميل نسخة احتياطية من قاعدة البيانات</a></p>
+    <form id="restore-form"><label>استعادة من ملف <input id="restore-file" type="file" accept=".db" required></label><button type="submit">استعادة</button></form>
+    </div>`;
+  $('#pw-form').addEventListener('submit', async (e) => { e.preventDefault(); await api('/api/users/change-password', { method: 'POST', body: JSON.stringify({ username: $('#pw-user').value, newPassword: $('#pw-new').value }) }); $('#pw-msg').textContent = 'تم تغيير الباسورد'; });
+  $('#cr-form').addEventListener('submit', async (e) => { e.preventDefault(); await api('/api/change-requests', { method: 'POST', body: JSON.stringify({ text: $('#cr-text').value }) }); render(); });
+  $('#wa-btn').addEventListener('click', async () => {
+    const text = $('#cr-text') ? $('#cr-text').value : '';
+    const msg = `أنا محمد، جاي من تطبيق PharmacyTarget\n${text ? 'عايز تعديل: ' + text : 'عايز تعديل في التطبيق'}`;
+    try { await navigator.clipboard.writeText(msg); } catch (e) { /* clipboard may need permission */ }
+    window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
+  });
+  $('#restore-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(); fd.append('file', $('#restore-file').files[0]);
+    const r = await fetch('/api/restore', { method: 'POST', body: fd });
+    alert(r.ok ? 'تمت الاستعادة — سجل الدخول مرة أخرى' : 'فشلت الاستعادة');
+  });
+}
+
+// ---------- Operation catalog ----------
+function renderCatalog(v) {
+  v.innerHTML = `<div class="card"><h2>كتالوج التشغيل</h2>
+    <h3>كلام جاهز للعرض أمام الإدارة</h3>
+    <p>«نظام PharmacyTarget بيتابع تارجت الفرع الشهري ويقسمه على الموظفين بشكل عادل حسب أيام العمل، وكل موظف بيعرف مطلوبه اليومي وبيسجل نتائجه بعد الشيفت، والمدير بيشوف كل حاجة لحظة بلحظة، والتقارير الشهرية بتكشف المشاكل وحلولها، والـ Preferred List بتضمن تركيز الفريق على الأصناف الأهم.»</p>
+    <h3>دورة العمل اليومية</h3>
+    <ol><li>المدير يتأكد من تارجت الفرع والـ Preferred List.</li><li>كل موظف يشوف مطلوبه اليومي في لوحته.</li><li>بعد الشيفت: الموظف يسجل نتائج اليوم ويدوس حفظ.</li><li>المدير يراجع لوحة الفريق والتنبيهات.</li><li>آخر الشهر: المدير يرفع شيت المبيعات والأصناف، والتطبيق يحلل ويقول حققنا ولا لأ.</li></ol>
+    <h3>خطة أول شهر (تجريبي)</h3>
+    <p>الأسبوع الأول: تدريب الفريق على تسجيل النتائج. الأسبوع الثاني: متابعة يومية للمطلوب اليومي. الأسبوع الثالث: أول تقرير شهري جزئي وحلول للمشاكل. الأسبوع الرابع: تقييم كامل وقرار الاستمرار.</p>
+    <h3>أسئلة متوقعة من الإدارة</h3>
+    <p><b>البيانات بتتزامن؟</b> أيوه، كل البيانات على الخادم وبتظهر لكل الأجهزة فورًا.<br>
+    <b>الباسوردات آمنة؟</b> أيوه، مشفرة على الخادم ولا تظهر في كود الصفحة.<br>
+    <b>لو النت قطع؟</b> سجل النتائج عند عودة الاتصال؛ النسخة الاحتياطية الأسبوعية من قاعدة البيانات إلزامية.</p>
+    </div>`;
+}
+
+// ---------- Boot: check existing session ----------
+(async () => {
+  try {
+    const d = await api('/api/me');
+    user = d.user;
+    $('#login-card').hidden = true;
+    $('#dashboard').hidden = false;
+    $('#who').textContent = `${user.name} — ${roleName(user.role)}`;
+    await loadAll();
+    renderTabs();
+    render();
+  } catch (e) { /* stay on login */ }
+})();
