@@ -164,9 +164,10 @@ function renderEmployees(v) {
       <button type="submit">حفظ الموظف</button> <span id="emp-msg"></span>
     </form></div>
     <div class="card"><h3>الموظفون الحاليون</h3>
-    <table><tr><th>الاسم</th><th>اليوزر</th><th>مبيعات</th><th>فواتير</th><th>تكويد</th><th>بنود خاصة</th><th></th></tr>
-    ${employees.map(e => `<tr><td>${e.name}</td><td>${e.username}</td><td>${fmt(e.monthly_sales)}</td><td>${fmt(e.monthly_invoices)}</td><td>${fmt(e.monthly_coding)}</td><td>${e.custom_items.map(i => i.name).join('، ') || '—'}</td><td><button class="danger" data-del="${e.id}">حذف</button></td></tr>`).join('')}
-    </table></div>`;
+    <table><tr><th>الاسم</th><th>اليوزر</th><th>مبيعات</th><th>فواتير</th><th>تكويد</th><th>بنود خاصة</th><th></th><th></th></tr>
+    ${employees.map(e => `<tr><td>${e.name}</td><td>${e.username}</td><td>${fmt(e.monthly_sales)}</td><td>${fmt(e.monthly_invoices)}</td><td>${fmt(e.monthly_coding)}</td><td>${e.custom_items.map(i => i.name).join('، ') || '—'}</td><td><button data-edit="${e.id}">تعديل</button></td><td><button class="danger" data-del="${e.id}">حذف</button></td></tr>`).join('')}
+    </table></div>
+    <div class="card" id="edit-emp" style="display:none"></div>`;
   const items = [];
   const renderItems = () => {
     $('#custom-items').innerHTML = items.map((it, i) => `<div><label>اسم البند <input data-i="${i}" data-f="name" value="${it.name}"></label><label>التارجت <input data-i="${i}" data-f="target" type="number" value="${it.target}"></label><button type="button" data-rm="${i}" class="danger">شيل البند</button></div>`).join('');
@@ -187,6 +188,38 @@ function renderEmployees(v) {
     if (!confirm('حذف هذا الموظف؟')) return;
     await api(`/api/employees/${b.dataset.del}`, { method: 'DELETE' });
     await loadAll(); renderEmployees(v);
+  }));
+  v.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
+    const e = employees.find(x => x.id === Number(b.dataset.edit));
+    if (!e) return;
+    const box = $('#edit-emp');
+    const items = JSON.parse(JSON.stringify(e.custom_items || []));
+    box.style.display = 'block';
+    box.innerHTML = `<h3>تعديل ${e.name}</h3>
+      <form id="edit-form">
+        <label>الاسم <input id="e-name" value="${e.name}" required></label>
+        <label>تارجت المبيعات الشهري <input id="e-sales" type="number" value="${e.monthly_sales}"></label>
+        <label>تارجت عدد الفواتير الشهري <input id="e-inv" type="number" value="${e.monthly_invoices}"></label>
+        <label>تارجت التكويد الشهري <input id="e-cod" type="number" value="${e.monthly_coding}"></label>
+        <h3>بنود خاصة بالموظف</h3>
+        <div id="edit-items"></div>
+        <button type="button" id="e-add-item" class="secondary">+ إضافة item</button>
+        <button type="submit">حفظ التعديل</button> <span id="edit-msg"></span>
+      </form>`;
+    const renderEditItems = () => {
+      $('#edit-items').innerHTML = items.map((it, i) => `<div><label>اسم البند <input data-i="${i}" data-f="name" value="${it.name}"></label><label>التارجت <input data-i="${i}" data-f="target" type="number" value="${it.target}"></label><button type="button" data-rm="${i}" class="danger">شيل البند</button></div>`).join('');
+      $('#edit-items').querySelectorAll('input').forEach(inp => inp.addEventListener('input', () => { items[Number(inp.dataset.i)][inp.dataset.f] = inp.dataset.f === 'target' ? Number(inp.value) : inp.value; }));
+      $('#edit-items').querySelectorAll('[data-rm]').forEach(x => x.addEventListener('click', () => { items.splice(Number(x.dataset.rm), 1); renderEditItems(); }));
+    };
+    $('#e-add-item').addEventListener('click', () => { items.push({ name: '', target: 0 }); renderEditItems(); });
+    renderEditItems();
+    $('#edit-form').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      await api(`/api/employees/${e.id}`, { method: 'PUT', body: JSON.stringify({ name: $('#e-name').value, monthly_sales: $('#e-sales').value, monthly_invoices: $('#e-inv').value, monthly_coding: $('#e-cod').value, custom_items: items }) });
+      $('#edit-msg').textContent = 'تم الحفظ';
+      await loadAll(); renderEmployees(v);
+    });
+    box.scrollIntoView();
   }));
 }
 
