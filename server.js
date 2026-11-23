@@ -672,21 +672,29 @@ app.post('/api/uploads', requireRole('owner', 'manager', 'superadmin'), upload.s
 function analyzeRows(type, rows) {
   const s = getSettings();
   if (type === 'items') {
-    // Normalized items rows: { item, value, qty, employee }
+    // Normalized items rows: { item, value, qty, employee, origin, company }
     let totalSales = 0, totalQty = 0;
     const byItem = {};
     const byEmployee = {};
+    const byOrigin = {};
+    const byCompany = {};
     const prefNames = db.prepare('SELECT name FROM preferred_items WHERE active=1').all().map(r => r.name.trim());
     let preferredValue = 0;
+    let highValueCount = 0, highValueTotal = 0;
     for (const row of rows) {
       const value = Number(row.value ?? row['إجمالى س.بيع'] ?? 0) || 0;
       const qty = Number(row.qty ?? row['الكمية'] ?? 0) || 0;
       const item = String(row.item ?? row['الصنف'] ?? row['الإسم'] ?? '').trim();
+      const origin = String(row.origin ?? row['المنشأ'] ?? '').trim() || 'غير محدد';
+      const company = String(row.company ?? row['الشركة'] ?? '').trim() || 'غير محددة';
       totalSales += value; totalQty += qty;
       if (item) {
         byItem[item] = (byItem[item] || 0) + value;
         if (prefNames.includes(item)) preferredValue += value;
+        if (value >= 1000) { highValueCount++; highValueTotal += value; }
       }
+      byOrigin[origin] = (byOrigin[origin] || 0) + value;
+      byCompany[company] = (byCompany[company] || 0) + value;
       const emp = String(row.employee ?? row['الموظف'] ?? '').trim();
       if (emp) {
         byEmployee[emp] = byEmployee[emp] || { sales: 0, invoices: 0, coding: 0 };
@@ -695,9 +703,15 @@ function analyzeRows(type, rows) {
     }
     const topItems = Object.entries(byItem).sort((a, b) => b[1] - a[1]).slice(0, 10)
       .map(([item, value]) => ({ item, value }));
+    const itemsCount = Object.keys(byItem).length;
     const branchSalesPct = pct(totalSales, s.branch_sales);
     return {
-      totalSales, totalQty, itemsCount: Object.keys(byItem).length,
+      totalSales, totalQty, itemsCount,
+      avgItemValue: itemsCount ? totalSales / itemsCount : 0,
+      avgPiecePrice: totalQty ? totalSales / totalQty : 0,
+      byOrigin: Object.entries(byOrigin).sort((a, b) => b[1] - a[1]).map(([origin, value]) => ({ origin, value, pct: pct(value, totalSales) })),
+      topCompanies: Object.entries(byCompany).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([company, value]) => ({ company, value })),
+      highValueCount, highValueTotal,
       branchSalesPct,
       achieved: totalSales >= s.branch_sales,
       verdict: totalSales >= s.branch_sales
@@ -707,19 +721,22 @@ function analyzeRows(type, rows) {
       byEmployee,
     };
   }
-  let totalSales = 0, totalInvoices = 0, totalCoding = 0;
+  let totalSales = 0, totalInvoices = 0, totalCoding = 0, totalQty = 0;
   const byEmployee = {};
   for (const row of rows) {
     const sales = Number(row.sales || row['المبيعات'] || row['مبيعات'] || 0);
     const inv = Number(row.invoices || row['الفواتير'] || row['فواتير'] || 0);
     const cod = Number(row.coding || row['التكويد'] || row['تكويد'] || 0);
-    totalSales += sales; totalInvoices += inv; totalCoding += cod;
+    const qty = Number(row.qty || row['الكمية'] || row['عدد القطع'] || 0);
+    totalSales += sales; totalInvoices += inv; totalCoding += cod; totalQty += qty;
     const emp = String(row.employee || row['الموظف'] || 'غير محدد');
     byEmployee[emp] = byEmployee[emp] || { sales: 0, invoices: 0, coding: 0 };
     byEmployee[emp].sales += sales; byEmployee[emp].invoices += inv; byEmployee[emp].coding += cod;
   }
   return {
-    totalSales, totalInvoices, totalCoding,
+    totalSales, totalInvoices, totalCoding, totalQty,
+    avgInvoiceValue: totalInvoices ? totalSales / totalInvoices : 0,
+    avgPiecesPerInvoice: totalInvoices && totalQty ? totalQty / totalInvoices : 0,
     branchSalesPct: pct(totalSales, s.branch_sales),
     achieved: totalSales >= s.branch_sales,
     verdict: totalSales >= s.branch_sales
@@ -736,6 +753,13 @@ app.get('/api/uploads/:id/analysis', requireAuth, (req, res) => {
   const u = db.prepare('SELECT * FROM sheet_uploads WHERE id=?').get(req.params.id);
   if (!u) return res.status(404).json({ error: 'غير موجود' });
   res.json({ ...u, rows: JSON.parse(u.rows_json || '[]'), analysis: analyzeRows(u.type, JSON.parse(u.rows_json || '[]')) });
+});
+app.delete('/api/uploads/:id', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const u = db.prepare('SELECT filename FROM sheet_uploads WHERE id=?').get(req.params.id);
+  if (!u) return res.status(404).json({ error: 'غير موجود' });
+  db.prepare('DELETE FROM sheet_uploads WHERE id=?').run(req.params.id);
+  audit(me(req).username, 'upload_delete', `حذف شيت ${u.filename}`);
+  res.json({ ok: true });
 });
 
 // ---------- Change requests (Mohamed only) ----------
