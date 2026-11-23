@@ -227,6 +227,29 @@ function renderEmployees(v) {
 // ---------- Reports ----------
 async function renderReports(v) {
   const rep = await api(`/api/reports/summary?month=${month}`);
+  // Full target report: why achieved / not, how to achieve, solutions
+  const [yy, mm] = month.split('-').map(Number);
+  const daysInMonth = new Date(yy, mm, 0).getDate();
+  const now = new Date();
+  const isCurrent = month === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const elapsed = isCurrent ? Math.max(1, now.getDate() - 1) : daysInMonth;
+  const remaining = Math.max(0, daysInMonth - elapsed);
+  const bTarget = rep.settings.branch_sales, bSales = rep.totals.sales;
+  const bPct = bTarget ? Math.round(bSales / bTarget * 100) : 0;
+  const shortfall = Math.max(0, bTarget - bSales);
+  const avgDaily = elapsed ? bSales / elapsed : 0;
+  const requiredDaily = remaining ? shortfall / remaining : 0;
+  const projection = bSales + avgDaily * remaining;
+  const verdict = bPct >= 100
+    ? 'حققنا تارجت الفرع هذا الشهر.'
+    : remaining === 0
+      ? 'الشهر انتهى ولم نحقق تارجت الفرع.'
+      : avgDaily >= requiredDaily
+        ? 'على المسار الصحيح — بالمعدل اليومي الحالي سنحقق التارجت قبل نهاية الشهر.'
+        : 'متأخرون — المعدل اليومي الحالي أقل من المطلوب لتحقيق التارجت.';
+  const sheetSales = rep.sheets ? rep.sheets.sales : 0;
+  const dailySales = bSales - sheetSales;
+  const noEmpData = rep.perEmployee.every(e => e.achieved.sales === 0 && e.achieved.invoices === 0);
   v.innerHTML = `<div class="card"><h2>تقارير شهرية — ${month}</h2>
     <label>الشهر <input type="month" id="month-pick" value="${month}"></label>
     <p>إجمالي المبيعات: ${fmt(rep.totals.sales)} جنيه — الفواتير: ${fmt(rep.totals.invoices)} — متوسط الفاتورة: ${fmt(rep.avgInvoice)} جنيه — التكويد: ${fmt(rep.totals.coding)} — التوصيل: ${fmt(rep.totals.delivery)} — Preferred: ${fmt(rep.totals.preferred)} جنيه</p>
@@ -235,6 +258,33 @@ async function renderReports(v) {
     </table>
     <h3>المشاكل الظاهرة في التقارير وحلولها</h3>
     ${rep.problems.length ? rep.problems.map(p => `<div class="problem"><b>${p.problem}</b><br>السبب: ${p.cause}<br>الحل: ${p.solution}<br>مؤشر المتابعة: ${p.indicator}</div>`).join('') : '<p class="ok">لا توجد مشاكل ظاهرة هذا الشهر.</p>'}
+    <h3>تقرير التارجت الكامل</h3>
+    <div class="${bPct >= 100 ? 'good' : 'problem'}"><b>${verdict}</b><br>
+      تارجت الفرع: ${fmt(bTarget)} جنيه — حققنا: ${fmt(bSales)} جنيه (${bPct}%)<br>
+      ${bPct < 100 ? `المتبقي لتحقيق التارجت: ${fmt(shortfall)} جنيه<br>` : ''}
+      الأيام المنقضية: ${elapsed} من ${daysInMonth} — الأيام المتبقية: ${remaining}<br>
+      متوسط المبيعات اليومي حتى الآن: ${fmt(avgDaily)} جنيه
+      ${remaining > 0 && bPct < 100 ? ` — المطلوب يوميًا في الأيام المتبقية: ${fmt(requiredDaily)} جنيه` : ''}<br>
+      ${remaining > 0 && bPct < 100 ? `التوقع بالمعدل الحالي: ${fmt(projection)} جنيه بنهاية الشهر<br>` : ''}
+      منها من الشيتات المرفوعة: ${fmt(sheetSales)} جنيه — ومن تسجيل نتائج اليوم: ${fmt(dailySales)} جنيه
+    </div>
+    <h3>ليه حققنا / ليه محققناش</h3>
+    <p>${bPct >= 100
+      ? 'حققنا التارجت لأن إجمالي المبيعات (من الشيتات المرفوعة وتسجيل نتائج اليوم) وصل إلى التارجت أو تجاوزه.'
+      : remaining === 0
+        ? `لم نحقق التارجت لأن إجمالي المبيعات ${fmt(bSales)} جنيه أقل من التارجت ${fmt(bTarget)} جنيه بفارق ${fmt(shortfall)} جنيه، والشهر انتهى.`
+        : `لم نحقق التارجت بعد لأن الشهر لم ينتهِ — حققنا ${bPct}% حتى الآن، والمتبقي ${fmt(shortfall)} جنيه في ${remaining} أيام.`}
+      ${sheetSales > 0 && dailySales === 0 ? ' كل الأرقام الحالية من الشيتات المرفوعة فقط، ولا توجد نتائج يومية مسجلة من الموظفين.' : ''}
+    </p>
+    ${noEmpData ? '<p>لا يمكن تقسيم التحقيق على الموظفين: لا توجد نتائج يومية مسجلة، والشيت المرفوع لا يفصل المبيعات حسب اسم الموظف.</p>' : ''}
+    <h3>إزاي نحقق التارجت</h3>
+    ${bPct >= 100 ? '<p>التارجت متحقق — حافظ على نفس المعدل اليومي لباقي الشهر.</p>' : remaining === 0 ? '<p>الشهر انتهى — راجع التارجت للشهر القادم من «تعديل تارجت الفرع» في لوحة التحكم.</p>' : `<p>المطلوب يوميًا في الأيام المتبقية: مبيعات ${fmt(requiredDaily)} جنيه${rep.settings.branch_invoices ? ` — فواتير ${fmt(Math.max(0, rep.settings.branch_invoices - rep.totals.invoices) / remaining)}` : ''}${rep.settings.branch_coding ? ` — تكويد ${fmt(Math.max(0, rep.settings.branch_coding - rep.totals.coding) / remaining)}` : ''}.</p>
+    <table><tr><th>الموظف</th><th>المتبقي من تارجت المبيعات</th><th>المطلوب منه يوميًا</th></tr>
+    ${rep.perEmployee.map(e => `<tr><td>${e.name}</td><td>${fmt(Math.max(0, e.target.sales - e.achieved.sales))}</td><td>${fmt(Math.max(0, e.target.sales - e.achieved.sales) / remaining)}</td></tr>`).join('')}
+    </table>`}
+    <h3>الحلول المطلوبة</h3>
+    ${rep.problems.length ? rep.problems.map(p => `<div class="problem"><b>${p.employee} — ${p.problem}</b><br>الحل: ${p.solution}</div>`).join('') : '<p class="ok">لا توجد مشاكل ظاهرة — حافظ على المتابعة اليومية.</p>'}
+    <p>حلول عامة: سجّل كل موظف نتائج يومه من «تسجيل نتائج اليوم» حتى يظهر تحقيقه هو شخصيًا؛ ركّز على أصناف الـ Preferred؛ راجع أعلى 10 أصناف مبيعًا في تحليل الشيت ووفّرها دائمًا؛ ولو الشيت الجديد فيه اسم الموظف لكل فاتورة سيظهر التحقيق لكل موظف تلقائيًا.</p>
     <p><a href="/api/export.csv?month=${month}">تحميل التقرير CSV</a></p></div>`;
   $('#month-pick').addEventListener('change', (e) => { month = e.target.value; render(); });
 }
