@@ -462,7 +462,7 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
   // (they carry no employee names); sales sheets also feed per-employee totals.
   const sheetRows = db.prepare("SELECT * FROM sheet_uploads WHERE substr(created_at,1,7)=? ORDER BY id DESC").all(month);
   const seen = new Set();
-  const sheets = { sales: 0, invoices: 0, coding: 0, preferred: 0, files: [], byEmployee: {} };
+  const sheets = { sales: 0, invoices: 0, coding: 0, preferred: 0, itemsCount: 0, totalQty: 0, files: [], byEmployee: {} };
   for (const u of sheetRows) {
     const key = `${u.type}|${u.filename}`;
     if (seen.has(key)) continue;
@@ -472,6 +472,8 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
     sheets.invoices += a.totalInvoices || 0;
     sheets.coding += a.totalCoding || 0;
     sheets.preferred += a.preferredValue || 0;
+    sheets.itemsCount += a.itemsCount || 0;
+    sheets.totalQty += a.totalQty || 0;
     sheets.files.push(u.filename);
     for (const [name, v] of Object.entries(a.byEmployee || {})) {
       const n = String(name).trim();
