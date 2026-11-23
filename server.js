@@ -539,6 +539,34 @@ function readSheetBuffer(buffer, filename) {
   return XLSX.read(buffer, { type: 'buffer' });
 }
 
+// e-Plus items export (the pharmacy app's "تقرير مبيعات أصناف"): headers and
+// data rows are misaligned (RTL export), so it is parsed by position:
+// [total selling price, qty, unit, balance, origin, company, name, code, employee].
+// Footer rows ("عدد الأصناف" summary, "Page -1 of 1") are skipped.
+function normalizeItemsSheet(ws) {
+  const arr = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  if (!arr.length) return null;
+  const headers = arr[0].map(h => String(h).trim());
+  if (!headers.includes('إجمالى س.بيع') || !headers.includes('الإسم')) return null;
+  const rows = [];
+  for (const r of arr.slice(1)) {
+    const value = Number(r[0]);
+    const qty = Number(r[1]);
+    const name = String(r[6] ?? '').trim();
+    if (!name || isNaN(value) || isNaN(qty)) continue;
+    rows.push({
+      item: name,
+      code: String(r[7] ?? '').trim(),
+      company: String(r[5] ?? '').trim(),
+      origin: String(r[4] ?? '').trim(),
+      unit: String(r[2] ?? '').trim(),
+      qty, value,
+      employee: String(r[8] ?? '').trim(),
+    });
+  }
+  return rows;
+}
+
 // ---------- Preferred List ----------
 app.get('/api/preferred', requireAuth, (req, res) => {
   res.json(db.prepare("SELECT * FROM preferred_items WHERE active=1 ORDER BY CASE WHEN category='' THEN 1 ELSE 0 END, category, name").all());
@@ -628,7 +656,11 @@ app.post('/api/uploads', requireRole('owner', 'manager', 'superadmin'), upload.s
   try {
     const wb = readSheetBuffer(req.file.buffer, req.file.originalname);
     const ws = wb.Sheets[wb.SheetNames[0]];
-    rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+    if (type === 'items') {
+      rows = normalizeItemsSheet(ws) || XLSX.utils.sheet_to_json(ws, { defval: '' });
+    } else {
+      rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+    }
   } catch (e) {
     return res.status(400).json({ error: 'تعذر قراءة الملف' });
   }
@@ -638,6 +670,43 @@ app.post('/api/uploads', requireRole('owner', 'manager', 'superadmin'), upload.s
   res.json({ ok: true, id: r.lastInsertRowid, rows: rows.length, analysis: analyzeRows(type, rows) });
 });
 function analyzeRows(type, rows) {
+  const s = getSettings();
+  if (type === 'items') {
+    // Normalized items rows: { item, value, qty, employee }
+    let totalSales = 0, totalQty = 0;
+    const byItem = {};
+    const byEmployee = {};
+    const prefNames = db.prepare('SELECT name FROM preferred_items WHERE active=1').all().map(r => r.name.trim());
+    let preferredValue = 0;
+    for (const row of rows) {
+      const value = Number(row.value ?? row['إجمالى س.بيع'] ?? 0) || 0;
+      const qty = Number(row.qty ?? row['الكمية'] ?? 0) || 0;
+      const item = String(row.item ?? row['الصنف'] ?? row['الإسم'] ?? '').trim();
+      totalSales += value; totalQty += qty;
+      if (item) {
+        byItem[item] = (byItem[item] || 0) + value;
+        if (prefNames.includes(item)) preferredValue += value;
+      }
+      const emp = String(row.employee ?? row['الموظف'] ?? '').trim();
+      if (emp) {
+        byEmployee[emp] = byEmployee[emp] || { sales: 0, invoices: 0, coding: 0 };
+        byEmployee[emp].sales += value;
+      }
+    }
+    const topItems = Object.entries(byItem).sort((a, b) => b[1] - a[1]).slice(0, 10)
+      .map(([item, value]) => ({ item, value }));
+    const branchSalesPct = pct(totalSales, s.branch_sales);
+    return {
+      totalSales, totalQty, itemsCount: Object.keys(byItem).length,
+      branchSalesPct,
+      achieved: totalSales >= s.branch_sales,
+      verdict: totalSales >= s.branch_sales
+        ? `حققنا تارجت المبيعات في الشيت المرفوع — ${branchSalesPct}% من تارجت الفرع`
+        : `لم نحقق تارجت المبيعات بعد — حققنا ${branchSalesPct}% من تارجت الفرع (${s.branch_sales} جنيه)`,
+      topItems, preferredValue,
+      byEmployee,
+    };
+  }
   let totalSales = 0, totalInvoices = 0, totalCoding = 0;
   const byEmployee = {};
   for (const row of rows) {
@@ -649,7 +718,6 @@ function analyzeRows(type, rows) {
     byEmployee[emp] = byEmployee[emp] || { sales: 0, invoices: 0, coding: 0 };
     byEmployee[emp].sales += sales; byEmployee[emp].invoices += inv; byEmployee[emp].coding += cod;
   }
-  const s = getSettings();
   return {
     totalSales, totalInvoices, totalCoding,
     branchSalesPct: pct(totalSales, s.branch_sales),
