@@ -96,8 +96,9 @@ async function renderDashboard(v) {
       <div class="stat">التكويد<b>${fmt(rep.totals.coding)} / ${fmt(rep.settings.branch_coding)}</b></div>
       <div class="stat">متوسط الفاتورة<b>${fmt(rep.avgInvoice)} ج</b></div>
       <div class="stat">Preferred<b>${fmt(rep.totals.preferred)} ج</b></div>
+      ${rep.sheets && rep.sheets.itemsCount ? `<div class="stat">عدد الأصناف<b>${fmt(rep.sheets.itemsCount)}</b></div>` : ''}
     </div>
-    ${rep.sheets && rep.sheets.sales > 0 ? `<p class="ok">من الشيتات المرفوعة في الشهر ده: ${fmt(rep.sheets.sales)} جنيه مبيعات${rep.sheets.invoices ? ` — ${fmt(rep.sheets.invoices)} فاتورة` : ''}${rep.sheets.coding ? ` — تكويد ${fmt(rep.sheets.coding)}` : ''} (${[...new Set(rep.sheets.files)].join('، ')})</p>` : ''}
+    ${rep.sheets && rep.sheets.sales > 0 ? `<p class="ok">من الشيتات المرفوعة في الشهر ده: ${fmt(rep.sheets.sales)} جنيه مبيعات${rep.sheets.invoices ? ` — ${fmt(rep.sheets.invoices)} فاتورة` : ''}${rep.sheets.coding ? ` — تكويد ${fmt(rep.sheets.coding)}` : ''}${rep.sheets.itemsCount ? ` — ${fmt(rep.sheets.itemsCount)} صنف بإجمالي ${fmt(rep.sheets.totalQty)} قطعة` : ''} (${[...new Set(rep.sheets.files)].join('، ')})</p>` : ''}
     <h3>الفريق</h3>
     <table><tr><th>الموظف</th><th>المبيعات</th><th>الفواتير</th><th>التكويد</th><th>المؤشر</th><th>التصنيف</th></tr>
     ${rep.perEmployee.map(e => `<tr><td>${e.name}</td><td>${fmt(e.achieved.sales)} / ${fmt(e.target.sales)}</td><td>${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)}</td><td>${fmt(e.achieved.coding)} / ${fmt(e.target.coding)}</td><td>${e.index}%</td><td><span class="badge">${e.classification}</span></td></tr>`).join('')}
