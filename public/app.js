@@ -266,6 +266,18 @@ function renderUploads(v) {
     const d = await r.json();
     if (!r.ok) { $('#up-result').innerHTML = `<p class="error">${d.error}</p>`; return; }
     const a = d.analysis;
+    if (a.topItems) {
+      const emps = Object.entries(a.byEmployee);
+      $('#up-result').innerHTML = `<div class="${a.achieved ? 'good' : 'problem'}"><b>${a.verdict}</b><br>
+      إجمالي المبيعات في الشيت: ${fmt(a.totalSales)} جنيه — نسبة تحقيق تارجت الفرع: ${a.branchSalesPct}%<br>
+      عدد الأصناف: ${fmt(a.itemsCount)} — إجمالي الكمية: ${fmt(a.totalQty)}<br>
+      قيمة الـ Preferred في الشيت: ${fmt(a.preferredValue)} جنيه<br>
+      <h3>أعلى 10 أصناف مبيعًا</h3>
+      <table><tr><th>الصنف</th><th>القيمة</th></tr>${a.topItems.map(t => `<tr><td>${t.item}</td><td>${fmt(t.value)} ج</td></tr>`).join('')}</table>
+      ${emps.length ? emps.map(([n, x]) => `${n}: مبيعات ${fmt(x.sales)}`).join('<br>') : '<p>الشيت مفيهوش اسم موظف لكل صنف، فمفيش تقسيم حسب الموظف.</p>'}
+      </div>`;
+      return;
+    }
     $('#up-result').innerHTML = `<div class="${a.achieved ? 'good' : 'problem'}"><b>${a.verdict}</b><br>
       إجمالي المبيعات في الشيت: ${fmt(a.totalSales)} جنيه — الفواتير: ${fmt(a.totalInvoices)} — التكويد: ${fmt(a.totalCoding)}<br>
       نسبة تحقيق تارجت الفرع: ${a.branchSalesPct}%<br>
