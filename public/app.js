@@ -244,6 +244,25 @@ async function renderPreferred(v) {
 }
 
 // ---------- Uploads ----------
+function showUploadAnalysis(a) {
+  if (a.topItems) {
+    const emps = Object.entries(a.byEmployee);
+    $('#up-result').innerHTML = `<div class="${a.achieved ? 'good' : 'problem'}"><b>${a.verdict}</b><br>
+      إجمالي المبيعات في الشيت: ${fmt(a.totalSales)} جنيه — نسبة تحقيق تارجت الفرع: ${a.branchSalesPct}%<br>
+      عدد الأصناف: ${fmt(a.itemsCount)} — إجمالي الكمية: ${fmt(a.totalQty)}<br>
+      قيمة الـ Preferred في الشيت: ${fmt(a.preferredValue)} جنيه<br>
+      <h3>أعلى 10 أصناف مبيعًا</h3>
+      <table><tr><th>الصنف</th><th>القيمة</th></tr>${a.topItems.map(t => `<tr><td>${t.item}</td><td>${fmt(t.value)} ج</td></tr>`).join('')}</table>
+      ${emps.length ? emps.map(([n, x]) => `${n}: مبيعات ${fmt(x.sales)}`).join('<br>') : '<p>الشيت مفيهوش اسم موظف لكل صنف، فمفيش تقسيم حسب الموظف.</p>'}
+      </div>`;
+    return;
+  }
+  $('#up-result').innerHTML = `<div class="${a.achieved ? 'good' : 'problem'}"><b>${a.verdict}</b><br>
+    إجمالي المبيعات في الشيت: ${fmt(a.totalSales)} جنيه — الفواتير: ${fmt(a.totalInvoices)} — التكويد: ${fmt(a.totalCoding)}<br>
+    نسبة تحقيق تارجت الفرع: ${a.branchSalesPct}%<br>
+    ${Object.entries(a.byEmployee).map(([n, x]) => `${n}: مبيعات ${fmt(x.sales)}، فواتير ${fmt(x.invoices)}، تكويد ${fmt(x.coding)}`).join('<br>')}
+    </div>`;
+}
 function renderUploads(v) {
   v.innerHTML = `<div class="card"><h2>رفع تقارير أكسيل</h2>
     <p>اسحب تقرير المبيعات الشهري أو تقرير مبيعات الأصناف من تطبيق الصيدلية وارفعه هنا (Excel أو CSV). التطبيق يحلل الشيت ويقول حققنا ولا لأ.</p>
@@ -255,7 +274,12 @@ function renderUploads(v) {
     <div id="up-result"></div>
     <h3>ملفات مرفوعة سابقًا</h3><div id="up-list"></div></div>`;
   api('/api/uploads').then(list => {
-    $('#up-list').innerHTML = list.length ? `<table><tr><th>الملف</th><th>النوع</th><th>رفعه</th><th>التاريخ</th></tr>${list.map(u => `<tr><td>${u.filename}</td><td>${u.type === 'sales' ? 'مبيعات شهري' : u.type === 'preferred' ? 'شيت Preferred' : 'مبيعات أصناف'}</td><td>${u.uploaded_by}</td><td>${u.created_at}</td></tr>`).join('')}</table>` : '<p>لا توجد ملفات بعد.</p>';
+    $('#up-list').innerHTML = list.length ? `<table><tr><th>الملف</th><th>النوع</th><th>رفعه</th><th>التاريخ</th><th></th></tr>${list.map(u => `<tr><td>${u.filename}</td><td>${u.type === 'sales' ? 'مبيعات شهري' : u.type === 'preferred' ? 'شيت Preferred' : 'مبيعات أصناف'}</td><td>${u.uploaded_by}</td><td>${u.created_at}</td><td><button data-viewup="${u.id}">عرض التحليل</button></td></tr>`).join('')}</table>` : '<p>لا توجد ملفات بعد.</p>';
+    document.querySelectorAll('[data-viewup]').forEach(b => b.addEventListener('click', async () => {
+      const d = await api(`/api/uploads/${b.dataset.viewup}/analysis`);
+      showUploadAnalysis(d.analysis);
+      document.getElementById('up-result').scrollIntoView();
+    }));
   });
   $('#up-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -265,24 +289,7 @@ function renderUploads(v) {
     const r = await fetch('/api/uploads', { method: 'POST', body: fd });
     const d = await r.json();
     if (!r.ok) { $('#up-result').innerHTML = `<p class="error">${d.error}</p>`; return; }
-    const a = d.analysis;
-    if (a.topItems) {
-      const emps = Object.entries(a.byEmployee);
-      $('#up-result').innerHTML = `<div class="${a.achieved ? 'good' : 'problem'}"><b>${a.verdict}</b><br>
-      إجمالي المبيعات في الشيت: ${fmt(a.totalSales)} جنيه — نسبة تحقيق تارجت الفرع: ${a.branchSalesPct}%<br>
-      عدد الأصناف: ${fmt(a.itemsCount)} — إجمالي الكمية: ${fmt(a.totalQty)}<br>
-      قيمة الـ Preferred في الشيت: ${fmt(a.preferredValue)} جنيه<br>
-      <h3>أعلى 10 أصناف مبيعًا</h3>
-      <table><tr><th>الصنف</th><th>القيمة</th></tr>${a.topItems.map(t => `<tr><td>${t.item}</td><td>${fmt(t.value)} ج</td></tr>`).join('')}</table>
-      ${emps.length ? emps.map(([n, x]) => `${n}: مبيعات ${fmt(x.sales)}`).join('<br>') : '<p>الشيت مفيهوش اسم موظف لكل صنف، فمفيش تقسيم حسب الموظف.</p>'}
-      </div>`;
-      return;
-    }
-    $('#up-result').innerHTML = `<div class="${a.achieved ? 'good' : 'problem'}"><b>${a.verdict}</b><br>
-      إجمالي المبيعات في الشيت: ${fmt(a.totalSales)} جنيه — الفواتير: ${fmt(a.totalInvoices)} — التكويد: ${fmt(a.totalCoding)}<br>
-      نسبة تحقيق تارجت الفرع: ${a.branchSalesPct}%<br>
-      ${Object.entries(a.byEmployee).map(([n, x]) => `${n}: مبيعات ${fmt(x.sales)}، فواتير ${fmt(x.invoices)}، تكويد ${fmt(x.coding)}`).join('<br>')}
-      </div>`;
+    showUploadAnalysis(d.analysis);
   });
 }
 
