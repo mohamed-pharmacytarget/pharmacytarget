@@ -250,7 +250,13 @@ function showUploadAnalysis(a) {
     $('#up-result').innerHTML = `<div class="${a.achieved ? 'good' : 'problem'}"><b>${a.verdict}</b><br>
       إجمالي المبيعات في الشيت: ${fmt(a.totalSales)} جنيه — نسبة تحقيق تارجت الفرع: ${a.branchSalesPct}%<br>
       عدد الأصناف: ${fmt(a.itemsCount)} — إجمالي الكمية: ${fmt(a.totalQty)}<br>
+      متوسط قيمة الصنف: ${fmt(a.avgItemValue)} جنيه — متوسط سعر القطعة: ${fmt(a.avgPiecePrice)} جنيه<br>
       قيمة الـ Preferred في الشيت: ${fmt(a.preferredValue)} جنيه<br>
+      أصناف فوق 1000 جنيه: ${fmt(a.highValueCount)} صنف بإجمالي ${fmt(a.highValueTotal)} جنيه<br>
+      <h3>المبيعات حسب المنشأ</h3>
+      <table><tr><th>المنشأ</th><th>القيمة</th><th>النسبة</th></tr>${a.byOrigin.map(o => `<tr><td>${o.origin}</td><td>${fmt(o.value)} ج</td><td>${o.pct}%</td></tr>`).join('')}</table>
+      <h3>أعلى 5 شركات مبيعًا</h3>
+      <table><tr><th>الشركة</th><th>القيمة</th></tr>${a.topCompanies.map(c => `<tr><td>${c.company}</td><td>${fmt(c.value)} ج</td></tr>`).join('')}</table>
       <h3>أعلى 10 أصناف مبيعًا</h3>
       <table><tr><th>الصنف</th><th>القيمة</th></tr>${a.topItems.map(t => `<tr><td>${t.item}</td><td>${fmt(t.value)} ج</td></tr>`).join('')}</table>
       ${emps.length ? emps.map(([n, x]) => `${n}: مبيعات ${fmt(x.sales)}`).join('<br>') : '<p>الشيت مفيهوش اسم موظف لكل صنف، فمفيش تقسيم حسب الموظف.</p>'}
@@ -260,6 +266,7 @@ function showUploadAnalysis(a) {
   $('#up-result').innerHTML = `<div class="${a.achieved ? 'good' : 'problem'}"><b>${a.verdict}</b><br>
     إجمالي المبيعات في الشيت: ${fmt(a.totalSales)} جنيه — الفواتير: ${fmt(a.totalInvoices)} — التكويد: ${fmt(a.totalCoding)}<br>
     نسبة تحقيق تارجت الفرع: ${a.branchSalesPct}%<br>
+    متوسط سعر الفاتورة: ${fmt(a.avgInvoiceValue)} جنيه${a.avgPiecesPerInvoice ? ` — متوسط عدد القطع في كل فاتورة: ${fmt(a.avgPiecesPerInvoice)}` : ''}<br>
     ${Object.entries(a.byEmployee).map(([n, x]) => `${n}: مبيعات ${fmt(x.sales)}، فواتير ${fmt(x.invoices)}، تكويد ${fmt(x.coding)}`).join('<br>')}
     </div>`;
 }
@@ -274,11 +281,16 @@ function renderUploads(v) {
     <div id="up-result"></div>
     <h3>ملفات مرفوعة سابقًا</h3><div id="up-list"></div></div>`;
   api('/api/uploads').then(list => {
-    $('#up-list').innerHTML = list.length ? `<table><tr><th>الملف</th><th>النوع</th><th>رفعه</th><th>التاريخ</th><th></th></tr>${list.map(u => `<tr><td>${u.filename}</td><td>${u.type === 'sales' ? 'مبيعات شهري' : u.type === 'preferred' ? 'شيت Preferred' : 'مبيعات أصناف'}</td><td>${u.uploaded_by}</td><td>${u.created_at}</td><td><button data-viewup="${u.id}">عرض التحليل</button></td></tr>`).join('')}</table>` : '<p>لا توجد ملفات بعد.</p>';
+    $('#up-list').innerHTML = list.length ? `<table><tr><th>الملف</th><th>النوع</th><th>رفعه</th><th>التاريخ</th><th></th><th></th></tr>${list.map(u => `<tr><td>${u.filename}</td><td>${u.type === 'sales' ? 'مبيعات شهري' : u.type === 'preferred' ? 'شيت Preferred' : 'مبيعات أصناف'}</td><td>${u.uploaded_by}</td><td>${u.created_at}</td><td><button data-viewup="${u.id}">عرض التحليل</button></td><td><button class="danger" data-delup="${u.id}">حذف</button></td></tr>`).join('')}</table>` : '<p>لا توجد ملفات بعد.</p>';
     document.querySelectorAll('[data-viewup]').forEach(b => b.addEventListener('click', async () => {
       const d = await api(`/api/uploads/${b.dataset.viewup}/analysis`);
       showUploadAnalysis(d.analysis);
       document.getElementById('up-result').scrollIntoView();
+    }));
+    document.querySelectorAll('[data-delup]').forEach(b => b.addEventListener('click', async () => {
+      if (!confirm('تحذف الشيت ده؟')) return;
+      await api(`/api/uploads/${b.dataset.delup}`, { method: 'DELETE' });
+      render();
     }));
   });
   $('#up-form').addEventListener('submit', async (e) => {
