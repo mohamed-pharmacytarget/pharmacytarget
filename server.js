@@ -457,8 +457,34 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
   const wd = workingDays(month);
   const today = new Date().toISOString().slice(0, 10);
   const dayNum = month === today.slice(0, 7) ? Number(today.slice(8, 10)) : monthRange(month).daysInMonth;
+  // Sheet totals for this month: latest upload per (type, filename) so re-uploading
+  // the same file does not double-count. Items sheets feed branch totals only
+  // (they carry no employee names); sales sheets also feed per-employee totals.
+  const sheetRows = db.prepare("SELECT * FROM sheet_uploads WHERE substr(created_at,1,7)=? ORDER BY id DESC").all(month);
+  const seen = new Set();
+  const sheets = { sales: 0, invoices: 0, coding: 0, preferred: 0, files: [], byEmployee: {} };
+  for (const u of sheetRows) {
+    const key = `${u.type}|${u.filename}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const a = analyzeRows(u.type, JSON.parse(u.rows_json || '[]'));
+    sheets.sales += a.totalSales || 0;
+    sheets.invoices += a.totalInvoices || 0;
+    sheets.coding += a.totalCoding || 0;
+    sheets.preferred += a.preferredValue || 0;
+    sheets.files.push(u.filename);
+    for (const [name, v] of Object.entries(a.byEmployee || {})) {
+      const n = String(name).trim();
+      sheets.byEmployee[n] = sheets.byEmployee[n] || { sales: 0, invoices: 0, coding: 0 };
+      sheets.byEmployee[n].sales += v.sales || 0;
+      sheets.byEmployee[n].invoices += v.invoices || 0;
+      sheets.byEmployee[n].coding += v.coding || 0;
+    }
+  }
   const perEmployee = emps.map(e => {
     const t = employeeTotals(e.id, month);
+    const sh = sheets.byEmployee[e.name.trim()] || { sales: 0, invoices: 0, coding: 0 };
+    t.sales += sh.sales; t.invoices += sh.invoices; t.coding += sh.coding;
     const dailySales = e.monthly_sales / wd;
     const remainingDays = remainingWorkingDays(month, Math.min(dayNum + 1, monthRange(month).daysInMonth));
     const tomorrowSales = Math.max(0, Math.round((e.monthly_sales - t.sales) / remainingDays));
@@ -478,6 +504,12 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
     coding: a.coding + e.achieved.coding, delivery: a.delivery + e.achieved.delivery,
     preferred: a.preferred + e.achieved.preferred,
   }), { sales: 0, invoices: 0, coding: 0, delivery: 0, preferred: 0 });
+  // Items sheets carry no employee names, so their branch sales live only here.
+  const branchOnlySheetSales = sheets.sales - perEmployee.reduce((a, e) => a + (sheets.byEmployee[e.name.trim()]?.sales || 0), 0);
+  totals.sales += branchOnlySheetSales;
+  totals.invoices += sheets.invoices - perEmployee.reduce((a, e) => a + (sheets.byEmployee[e.name.trim()]?.invoices || 0), 0);
+  totals.coding += sheets.coding - perEmployee.reduce((a, e) => a + (sheets.byEmployee[e.name.trim()]?.coding || 0), 0);
+  totals.preferred += sheets.preferred;
   const avgInvoice = totals.invoices > 0 ? Math.round(totals.sales / totals.invoices) : 0;
   // Problems auto-detected from real numbers
   const problems = [];
@@ -495,7 +527,7 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
   if (totals.sales < settings.branch_sales * 0.5 && dayNum >= 15) {
     problems.push({ employee: 'الفرع', problem: 'مبيعات الفرع أقل من 50% من التارجت الشهري', cause: 'إجمالي المبيعات اليومية أقل من المطلوب', solution: 'اجتماع سريع مع الفريق، مراجعة الـ Preferred List، وزيادة المتابعة اليومية', indicator: 'نسبة تحقيق مبيعات الفرع' });
   }
-  res.json({ month, settings, workingDays: wd, totals, avgInvoice, perEmployee, problems });
+  res.json({ month, settings, workingDays: wd, totals, avgInvoice, perEmployee, problems, sheets });
 });
 
 // Smart Performance Coach
