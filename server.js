@@ -595,14 +595,30 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
       problems.push({ employee: e.name, problem: `عدد فواتير ${e.name} أقل من 50% من التارجت`, cause: 'عدد عملاء أقل أو فواتير مدمجة', solution: 'شجع الموظف على فصل الفواتير وتقديم خدمة سريعة لكل عميل', indicator: 'عدد الفواتير اليومي' });
     }
   }
+  // Real problems, not just %: tiny baskets (ATV far below the branch average)
+  // and near-zero activity late in the month.
+  if (anyActivity) {
+    const teamAtv = totals.invoices > 0 ? totals.sales / totals.invoices : 0;
+    for (const e of perEmployee) {
+      const atv = e.achieved.invoices > 0 ? e.achieved.sales / e.achieved.invoices : 0;
+      if (e.achieved.invoices >= 20 && teamAtv > 0 && atv < teamAtv * 0.75) {
+        problems.push({ employee: e.name, problem: `متوسط فاتورة ${e.name} (${Math.round(atv)} ج) أقل بكتير من متوسط الفرع (${Math.round(teamAtv)} ج) — سلال صغيرة`, cause: 'لا يقترح أصناف إضافية مع الفاتورة', solution: 'درّبه يقترح صنفًا مكملًا مع كل فاتورة (Preferred أولًا) وراجع متوسط فاتورته يوميًا', indicator: 'متوسط قيمة الفاتورة' });
+      }
+      if (dayNum >= 15 && e.achieved.invoices > 0 && e.achieved.invoices < 20) {
+        problems.push({ employee: e.name, problem: `نشاط ${e.name} شبه متوقف — ${e.achieved.invoices} فاتورة بس في الشهر لحد دلوقتي`, cause: 'غياب أو ورديات قليلة أو فواتير بتتسجل باسم حد تاني', solution: 'راجع وردياته وتأكد إن فواتيره بتتسجل باسمه في e-Plus', indicator: 'عدد الفواتير' });
+      }
+    }
+  }
   if (anyActivity && totals.sales < settings.branch_sales * 0.5 && dayNum >= 15) {
     problems.push({ employee: 'الفرع', problem: 'مبيعات الفرع أقل من 50% من التارجت الشهري', cause: 'إجمالي المبيعات اليومية أقل من المطلوب', solution: 'اجتماع سريع مع الفريق، مراجعة الـ Preferred List، وزيادة المتابعة اليومية', indicator: 'نسبة تحقيق مبيعات الفرع' });
   }
-  // Leaderboard: rank by % of sales target, with daily pace, month-end
-  // projection, average invoice (ATV), items per invoice (UPT) and
-  // improvement vs last month's % — the live-competition view.
+  // Leaderboard: the live month ranks by % of target; a finished month ranks
+  // by real sales (its targets were forecast FROM that month, so % would tie
+  // everyone). Each row also carries its share of branch sales and the
+  // improvement vs last month (null when last month has no data).
   const daysInMonth = monthRange(month).daysInMonth;
   const prevSheets = sheetTotalsForMonth(prevMonthStr(month));
+  const isPastMonth = month < today.slice(0, 7);
   const leaderboard = perEmployee.map(e => {
     const salesPct = pct(e.achieved.sales, e.target.sales);
     const prev = prevSheets.byEmployee[e.name.trim()] || { sales: 0 };
@@ -616,9 +632,11 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
       projection: Math.round((e.achieved.sales / elapsed) * daysInMonth),
       atv: e.achieved.invoices > 0 ? Math.round(e.achieved.sales / e.achieved.invoices) : 0,
       upt: e.achieved.invoices > 0 ? +((e.achieved.qty || 0) / e.achieved.invoices).toFixed(1) : 0,
-      improved: salesPct - prevPct,
+      share: totals.sales > 0 ? Math.round((e.achieved.sales / totals.sales) * 100) : 0,
+      improved: (prev.sales || 0) > 0 ? salesPct - prevPct : null,
     };
-  }).sort((a, b) => b.salesPct - a.salesPct).map((r, i) => ({ ...r, rank: i + 1 }));
+  }).sort((a, b) => isPastMonth ? b.achieved.sales - a.achieved.sales : b.salesPct - a.salesPct)
+    .map((r, i) => ({ ...r, rank: i + 1, rankBy: isPastMonth ? 'sales' : 'pct' }));
   res.json({ month, settings, workingDays: wd, totals, avgInvoice, perEmployee, problems, sheets, leaderboard });
 });
 
