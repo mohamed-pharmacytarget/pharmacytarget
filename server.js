@@ -811,6 +811,7 @@ app.get('/api/preferred/achievement', requireAuth, (req, res) => {
   const emps = ownPref ? db.prepare('SELECT * FROM employees WHERE id=? AND active=1').all(ownPref)
     : db.prepare('SELECT * FROM employees WHERE active=1').all();
   const prefNames = db.prepare('SELECT name FROM preferred_items WHERE active=1').all().map(r => r.name.trim());
+  const prefSetAch = new Set(prefNames.map(n => n.toLowerCase()));
   const out = emps.map(e => {
     const t = employeeTotals(e.id, month);
     // From uploaded items sheets
@@ -821,7 +822,7 @@ app.get('/api/preferred/achievement', requireAuth, (req, res) => {
       for (const row of JSON.parse(u.rows_json || '[]')) {
         const empName = String(row.employee || row['الموظف'] || '').trim();
         const item = String(row.item || row['الصنف'] || '').trim();
-        if (empName === e.name && prefNames.includes(item)) {
+        if (empName === e.name && prefSetAch.has(item.toLowerCase())) {
           const v = Number(row.value || row['القيمة'] || row.total || 0);
           sheetValue += v;
           sheetItems.push({ item, qty: Number(row.qty || row['الكمية'] || 0), value: v });
@@ -926,6 +927,7 @@ function analyzeRows(type, rows) {
     const byOrigin = {};
     const byCompany = {};
     const prefNames = db.prepare('SELECT name FROM preferred_items WHERE active=1').all().map(r => r.name.trim());
+    const prefSet = new Set(prefNames.map(n => n.toLowerCase()));
     let preferredValue = 0;
     let highValueCount = 0, highValueTotal = 0;
     for (const row of rows) {
@@ -937,7 +939,7 @@ function analyzeRows(type, rows) {
       totalSales += value; totalQty += qty;
       if (item) {
         byItem[item] = (byItem[item] || 0) + value;
-        if (prefNames.includes(item)) preferredValue += value;
+        if (prefSet.has(item.toLowerCase())) preferredValue += value;
         if (value >= 1000) { highValueCount++; highValueTotal += value; }
       }
       byOrigin[origin] = (byOrigin[origin] || 0) + value;
