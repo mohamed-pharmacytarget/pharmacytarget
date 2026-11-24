@@ -304,15 +304,28 @@ async function renderPreferred(v) {
   const items = await api('/api/preferred');
   const ach = await api(`/api/preferred/achievement?month=${month}`);
   const canEdit = ['owner', 'manager', 'superadmin'].includes(user.role);
+  const rep = canEdit ? await api(`/api/reports/summary?month=${month}`) : null;
+  const prefSales = canEdit ? await api(`/api/preferred/sales?month=${month}`) : null;
   const cats = [];
   for (const i of items) { const c = i.category || 'بدون فئة'; if (!cats.find(x => x.name === c)) cats.push({ name: c, items: [] }); cats.find(x => x.name === c).items.push(i); }
+  const sharePct = rep && rep.totals.sales > 0 ? Math.round(rep.totals.preferred / rep.totals.sales * 1000) / 10 : 0;
   v.innerHTML = `<div class="card"><h2>Preferred List — ${month}</h2>
+    ${canEdit && rep && prefSales ? `
+    <h3>مبيعات الـ Preferred في ${month}</h3>
+    <div class="grid">
+      <div class="stat">مبيعات Preferred<b>${fmt(rep.totals.preferred)} ج</b></div>
+      <div class="stat">إجمالي مبيعات الفرع<b>${fmt(rep.totals.sales)} ج</b></div>
+      <div class="stat">نسبة الـ Preferred من المبيعات<b>${sharePct}%</b></div>
+    </div>
+    ${prefSales.byCategory.length ? `<table><tr><th>الفئة</th><th>مبيعات Preferred</th><th>عدد الأصناف المباعة</th></tr>
+    ${prefSales.byCategory.map(c => `<tr><td>${c.category}</td><td>${fmt(Math.round(c.value))} ج</td><td>${c.count}</td></tr>`).join('')}
+    </table>` : '<p>لسه مفيش مبيعات Preferred مسجلة في الشهر ده.</p>'}` : ''}
     ${canEdit ? `
     <form id="pref-form"><label>اسم الصنف <input id="pref-name" required></label><label>السعر <input id="pref-price" type="number" value="0"></label><label>الفئة <input id="pref-cat" placeholder="مثال: كوزمتكس"></label><button type="submit">إضافة صنف</button></form>
     <form id="pref-up-form"><label>رفع شيت Preferred (Excel أو CSV) <input id="pref-up-file" type="file" accept=".xlsx,.xls,.csv" required></label><button type="submit">رفع وتحليل</button></form>
     <p>أعمدة الشيت: اسم الصنف، السعر، الفئة — التطبيق يصنّف الأصناف حسب الفئة تلقائيًا، والصنف بلا فئة يروح «بدون فئة». لو الصنف موجود قبل كده بيتحدّث سعره وفئته.</p>
     <div id="pref-up-result"></div>` : ''}
-    ${cats.map(c => `<h3>${c.name} — ${c.items.length} صنف — إجمالي ${fmt(c.items.reduce((s, i) => s + Number(i.price || 0), 0))} ج</h3>
+    ${cats.map(c => `<h3>${c.name} — ${c.items.length} صنف — إجمالي أسعار القايمة ${fmt(c.items.reduce((s, i) => s + Number(i.price || 0), 0))} ج</h3>
     <table><tr><th>الصنف</th><th>السعر</th>${canEdit ? '<th></th>' : ''}</tr>
     ${c.items.map(i => `<tr><td>${i.name}</td><td>${fmt(i.price)}</td>${canEdit ? `<td><button class="danger" data-delpref="${i.id}">حذف</button></td>` : ''}</tr>`).join('')}
     </table>`).join('') || '<p>لا توجد أصناف بعد.</p>'}
