@@ -448,8 +448,22 @@ app.post('/api/employees/batch', requireRole('owner', 'manager', 'superadmin'), 
   if (branch_invoices !== undefined) {
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('branch_invoices', String(Number(branch_invoices) || 0));
   }
+  const updated = [];
+  if (Array.isArray(req.body.updates)) {
+    for (const u of req.body.updates) {
+      db.prepare('UPDATE employees SET monthly_sales=?, monthly_invoices=?, monthly_coding=? WHERE id=?')
+        .run(Number(u.monthly_sales) || 0, Number(u.monthly_invoices) || 0, Number(u.monthly_coding) || 0, Number(u.id));
+      updated.push(Number(u.id));
+    }
+  }
+  if (req.body.settings && typeof req.body.settings === 'object') {
+    const set = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+    for (const k of ['branch_sales', 'branch_invoices', 'branch_coding', 'branch_delivery']) {
+      if (req.body.settings[k] !== undefined) set.run(k, String(Number(req.body.settings[k]) || 0));
+    }
+  }
   audit(me(req).username, 'batch_employees', `إضافة جماعية ${added.length} موظف، حذف ${deleted.length}`);
-  res.json({ ok: true, added, skipped, deleted });
+  res.json({ ok: true, added, skipped, deleted, updated });
 });
 app.put('/api/employees/:id', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
   const { name, monthly_sales, monthly_invoices, monthly_coding, custom_items } = req.body || {};
