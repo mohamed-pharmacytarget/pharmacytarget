@@ -652,36 +652,51 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
   totals.codingRate = totals.invoices ? Math.round(totals.coded / totals.invoices * 1000) / 10 : 0;
   totals.codingRateTarget = totals.codingRate ? Math.min(100, Math.round(totals.codingRate * 1.1 * 10) / 10) : 0;
   const avgInvoice = totals.invoices > 0 ? Math.round(totals.sales / totals.invoices) : 0;
-  // Problems auto-detected from real numbers.
-  // No per-employee data at all this month (no sheet rows, no daily entries)
-  // means "no data yet", not "everyone is behind" — skip the false alarms.
+  // Problems, analysed per employee from their REAL numbers — never the same
+  // generic text for everyone. Each employee gets at most their top 2 issues.
+  // No per-employee data at all this month means "no data yet", not "behind".
   const anyActivity = perEmployee.some(e => e.achieved.sales > 0 || e.achieved.invoices > 0 || e.achieved.coding > 0);
   const problems = [];
+  const monthIsPast = month < today.slice(0, 7);
+  const teamAtv = totals.invoices > 0 ? totals.sales / totals.invoices : 0;
+  const teamQty = perEmployee.reduce((a, e) => a + (e.achieved.qty || 0), 0);
+  const teamUpt = totals.invoices > 0 ? teamQty / totals.invoices : 0;
+  const branchRate = totals.codingRate || 0;
   for (const e of perEmployee) {
     if (!anyActivity) break;
-    if (e.target.sales > 0 && pct(e.achieved.sales, e.target.sales) < 50 && dayNum >= 15) {
-      problems.push({ employee: e.name, problem: `مبيعات ${e.name} أقل من 50% من التارجت في منتصف الشهر`, cause: 'مبيعات يومية أقل من المطلوب اليومي', solution: 'راجع المطلوب اليومي مع الموظف، ركز على أصناف الـ Preferred، وتابع نتائجه يوميًا', indicator: 'نسبة تحقيق المبيعات' });
+    const salesPct = pct(e.achieved.sales, e.target.sales);
+    const invPct = pct(e.achieved.invoices, e.target.invoices);
+    const atv = e.achieved.invoices > 0 ? e.achieved.sales / e.achieved.invoices : 0;
+    const upt = e.achieved.invoices > 0 ? (e.achieved.qty || 0) / e.achieved.invoices : 0;
+    const rate = e.achieved.codingRate || 0;
+    const empProblems = [];
+    if (e.target.sales > 0 && salesPct < 80 && dayNum >= 10) {
+      const gap = Math.max(0, e.target.sales - e.achieved.sales);
+      empProblems.push({ sev: 100 - salesPct, employee: e.name, problem: `مبيعات ${e.name} ${salesPct}% بس من التارجت — ناقص ${fmt0(gap)} جنيه`, cause: `مبيعاته اليومية ${fmt0(Math.round(e.achieved.sales / Math.max(1, dayNum)))} جنيه مقابل مطلوب ${fmt0(e.dailyRequired.sales)} جنيه في اليوم`, solution: monthIsPast ? `الشهر خلص — راجع معاه سبب القصور (متوسط فاتورته ${Math.round(atv)} ج، ${Math.round(upt * 10) / 10} صنف/فاتورة) وحط تارجت الشهر الجاي على أساسه` : `محتاج ${fmt0(e.tomorrow.sales)} جنيه في اليوم من بكره عشان يلحق — ركّز معاه على أصناف الـ Preferred والعملاء المكوّدين`, indicator: 'نسبة تحقيق المبيعات' });
     }
-    if (e.target.coding > 0 && pct(e.achieved.coding, e.target.coding) < 40) {
-      problems.push({ employee: e.name, problem: `تكويد ${e.name} متأخر عن التارجت`, cause: 'عدم تسجيل عملاء جدد (تكويد) بشكل يومي', solution: 'اطلب من كل موظف تكويد كل عميل جديد في نفس اليوم، وراجع عدد التكويد في تقرير نهاية اليوم', indicator: 'عدد التكويد اليومي' });
+    if (e.target.invoices > 0 && invPct < 80 && dayNum >= 10 && invPct < salesPct) {
+      const gapInv = Math.max(0, e.target.invoices - e.achieved.invoices);
+      empProblems.push({ sev: 90 - invPct, employee: e.name, problem: `عدد فواتير ${e.name} ${invPct}% بس من التارجت — ناقص ${fmt0(gapInv)} فاتورة`, cause: `بيعمل ${Math.round(e.achieved.invoices / Math.max(1, dayNum))} فاتورة في اليوم مقابل مطلوب ${e.dailyRequired.invoices} فاتورة`, solution: monthIsPast ? 'الشهر خلص — شوف هل كان غياب ورديات ولا فواتير بتتسجل باسم حد تاني، وظبط ورديات الشهر الجاي' : 'سرّع خدمة العملاء على الكاشير وخلّي كل عميل فاتورة لوحده بدل دمج الفواتير', indicator: 'عدد الفواتير اليومي' });
     }
-    if (e.target.invoices > 0 && pct(e.achieved.invoices, e.target.invoices) < 50 && dayNum >= 15) {
-      problems.push({ employee: e.name, problem: `عدد فواتير ${e.name} أقل من 50% من التارجت`, cause: 'عدد عملاء أقل أو فواتير مدمجة', solution: 'شجع الموظف على فصل الفواتير وتقديم خدمة سريعة لكل عميل', indicator: 'عدد الفواتير اليومي' });
+    if (rate > 0 && branchRate > 0 && rate < branchRate * 0.8 && e.achieved.invoices >= 100) {
+      const uncoded = e.achieved.invoices - (e.achieved.coded || 0);
+      empProblems.push({ sev: 60, employee: e.name, problem: `نسبة الفواتير بكود عند ${e.name} ${rate}% بس — أقل من متوسط الفرع ${branchRate}%`, cause: `${fmt0(uncoded)} فاتورة من ${fmt0(e.achieved.invoices)} طلعت من غير كود عميل`, solution: 'اطلب منه يأكد كود العميل قبل تقفيل أي فاتورة، وراجع معاه الفواتير اللي من غير كود في نهاية كل وردية', indicator: 'نسبة الفواتير بكود' });
     }
+    if (e.achieved.invoices >= 20 && teamAtv > 0 && atv < teamAtv * 0.75) {
+      empProblems.push({ sev: 40, employee: e.name, problem: `متوسط فاتورة ${e.name} (${Math.round(atv)} ج) أقل بكتير من متوسط الفرع (${Math.round(teamAtv)} ج) — سلال صغيرة`, cause: 'لا يقترح أصناف إضافية مع الفاتورة', solution: 'درّبه يقترح صنفًا مكملًا مع كل فاتورة (Preferred أولًا) وراجع متوسط فاتورته يوميًا', indicator: 'متوسط قيمة الفاتورة' });
+    }
+    if (e.achieved.invoices >= 20 && teamUpt > 0 && upt < teamUpt * 0.8) {
+      empProblems.push({ sev: 30, employee: e.name, problem: `${e.name} بيبيع ${Math.round(upt * 10) / 10} صنف في الفاتورة مقابل متوسط الفرع ${Math.round(teamUpt * 10) / 10}`, cause: 'بيع صنف واحد في أغلب الفواتير', solution: 'اقتراح صنف تاني مناسب مع كل روشتة (فيتامين أو عناية) يرفع عدد الأصناف في الفاتورة', indicator: 'أصناف / فاتورة' });
+    }
+    if (dayNum >= 15 && e.achieved.invoices > 0 && e.achieved.invoices < 20) {
+      empProblems.push({ sev: 70, employee: e.name, problem: `نشاط ${e.name} شبه متوقف — ${e.achieved.invoices} فاتورة بس في الشهر لحد دلوقتي`, cause: 'غياب أو ورديات قليلة أو فواتير بتتسجل باسم حد تاني', solution: 'راجع وردياته وتأكد إن فواتيره بتتسجل باسمه في e-Plus', indicator: 'عدد الفواتير' });
+    }
+    empProblems.sort((a, b) => b.sev - a.sev);
+    problems.push(...empProblems.slice(0, 2).map(({ sev, ...p }) => p));
   }
-  // Real problems, not just %: tiny baskets (ATV far below the branch average)
-  // and near-zero activity late in the month.
-  if (anyActivity) {
-    const teamAtv = totals.invoices > 0 ? totals.sales / totals.invoices : 0;
-    for (const e of perEmployee) {
-      const atv = e.achieved.invoices > 0 ? e.achieved.sales / e.achieved.invoices : 0;
-      if (e.achieved.invoices >= 20 && teamAtv > 0 && atv < teamAtv * 0.75) {
-        problems.push({ employee: e.name, problem: `متوسط فاتورة ${e.name} (${Math.round(atv)} ج) أقل بكتير من متوسط الفرع (${Math.round(teamAtv)} ج) — سلال صغيرة`, cause: 'لا يقترح أصناف إضافية مع الفاتورة', solution: 'درّبه يقترح صنفًا مكملًا مع كل فاتورة (Preferred أولًا) وراجع متوسط فاتورته يوميًا', indicator: 'متوسط قيمة الفاتورة' });
-      }
-      if (dayNum >= 15 && e.achieved.invoices > 0 && e.achieved.invoices < 20) {
-        problems.push({ employee: e.name, problem: `نشاط ${e.name} شبه متوقف — ${e.achieved.invoices} فاتورة بس في الشهر لحد دلوقتي`, cause: 'غياب أو ورديات قليلة أو فواتير بتتسجل باسم حد تاني', solution: 'راجع وردياته وتأكد إن فواتيره بتتسجل باسمه في e-Plus', indicator: 'عدد الفواتير' });
-      }
-    }
+  // One branch-level note (not per employee): no NEW-code data exists at all.
+  if (anyActivity && totals.coding === 0) {
+    problems.push({ employee: 'الفرع', problem: 'لا توجد بيانات أكواد جديدة مسجلة في الشهر ده', cause: 'الشيت بيقول كام فاتورة بكود، مش كام كود جديد اتعمل — والتسجيل اليومي فاضي', solution: 'التكويد الجديد يتسجل في "تسجيل نتائج اليوم" بعد كل وردية، أو ابعت شيت سبتمبر عشان نقارن الأكواد اللي ظهرت لأول مرة', indicator: 'بيانات التكويد' });
   }
   if (anyActivity && totals.sales < settings.branch_sales * 0.5 && dayNum >= 15) {
     problems.push({ employee: 'الفرع', problem: 'مبيعات الفرع أقل من 50% من التارجت الشهري', cause: 'إجمالي المبيعات اليومية أقل من المطلوب', solution: 'اجتماع سريع مع الفريق، مراجعة الـ Preferred List، وزيادة المتابعة اليومية', indicator: 'نسبة تحقيق مبيعات الفرع' });
