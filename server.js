@@ -1049,12 +1049,14 @@ app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, r
       const sales = Number(row.sales || 0);
       if (!code) { uncodedInvoices += 1; uncodedSales += sales; continue; }
       codedInvoices += 1;
-      const c = byCode[code] || (byCode[code] = { code, name: '', invoices: 0, sales: 0, firstDate: row.date || '', lastDate: row.date || '', employees: {} });
+      const c = byCode[code] || (byCode[code] = { code, name: '', invoices: 0, sales: 0, firstDate: row.date || '', lastDate: row.date || '', employees: {}, dates: [], firstHalf: 0, secondHalf: 0 });
       c.invoices += 1; c.sales += sales;
       if (row.customer) c.name = row.customer;
       if (row.date) {
         if (!c.firstDate || row.date < c.firstDate) c.firstDate = row.date;
         if (!c.lastDate || row.date > c.lastDate) c.lastDate = row.date;
+        c.dates.push(row.date);
+        if (+row.date.slice(8, 10) <= 15) c.firstHalf += 1; else c.secondHalf += 1;
       }
       const emp = String(row.employee || '').trim() || 'غير محدد';
       c.employees[emp] = (c.employees[emp] || 0) + 1;
@@ -1089,7 +1091,31 @@ app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, r
   const prevMonthKeys = Object.keys(priorMonths).sort();
   const prevKey = prevMonthKeys.length ? prevMonthKeys[prevMonthKeys.length - 1] : null;
   const prev = prevKey ? { month: prevKey, sales: Math.round(priorMonths[prevKey].sales * 100) / 100, invoices: priorMonths[prevKey].invoices, customers: priorMonths[prevKey].codes.size } : null;
+  // ---- Monthly report: chronic customers (regular visitors) + declining ones ----
+  // Codes "0" and "1" are generic walk-in codes, not individual customers.
+  const generic = c => c.code === '0' || c.code === '1';
+  const addDays = (iso, n) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+  const chronic = customers.filter(c => !generic(c) && c.invoices >= 4).map(c => {
+    const days = [...new Set(c.dates)].sort();
+    let avgGap = 30;
+    if (days.length > 1) {
+      let sum = 0;
+      for (let i = 1; i < days.length; i++) sum += (new Date(days[i]) - new Date(days[i - 1])) / 86400000;
+      avgGap = Math.max(1, Math.round(sum / (days.length - 1)));
+    }
+    return { code: c.code, name: c.name || '', phone: c.phone || '', invoices: c.invoices, sales: Math.round(c.sales * 100) / 100, avgGap, nextCall: addDays(c.lastDate, avgGap), lastDate: c.lastDate };
+  }).sort((a, b) => a.nextCall.localeCompare(b.nextCall)).slice(0, 30);
+  const declining = customers.filter(c => !generic(c)).map(c => {
+    const prev = priorByCode[c.code];
+    if (prev && prev.invoices >= 2 && c.invoices < prev.invoices)
+      return { code: c.code, name: c.name || '', phone: c.phone || '', prevInvoices: prev.invoices, invoices: c.invoices, dropPct: Math.round((prev.invoices - c.invoices) / prev.invoices * 100), lastDate: c.lastDate, basis: 'prev' };
+    if (!prev && c.firstHalf >= 3 && c.secondHalf < c.firstHalf)
+      return { code: c.code, name: c.name || '', phone: c.phone || '', prevInvoices: c.firstHalf, invoices: c.secondHalf, dropPct: Math.round((c.firstHalf - c.secondHalf) / c.firstHalf * 100), lastDate: c.lastDate, basis: 'half' };
+    return null;
+  }).filter(Boolean).sort((a, b) => b.dropPct - a.dropPct).slice(0, 30);
+  for (const c of customers) { delete c.dates; delete c.firstHalf; delete c.secondHalf; }
   const analytics = {
+    chronic, declining, decliningBasis: prevKey ? 'prev' : 'half',
     repeatCustomers: repeat.length,
     repeatRate: customers.length ? Math.round(repeat.length / customers.length * 1000) / 10 : 0,
     oneTimeCustomers: customers.length - repeat.length,
