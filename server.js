@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS employee_days_off (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL,
+  date TEXT NOT NULL,
+  created_by TEXT,
+  UNIQUE(employee_id, date)
+);
 CREATE TABLE IF NOT EXISTS daily_results (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   employee_id INTEGER NOT NULL,
@@ -343,6 +350,31 @@ function workingDays(month) { // exclude Fridays (Egypt weekend)
   }
   return n;
 }
+function offDaysFor(employeeId, month) {
+  return new Set(db.prepare('SELECT date FROM employee_days_off WHERE employee_id=? AND substr(date,1,7)=?').all(employeeId, month).map(r => r.date));
+}
+function workingDaysFor(month, offDates) {
+  // offDates: Set of 'YYYY-MM-DD' the employee chose. If empty, Fridays are the day off (old rule).
+  const { daysInMonth } = monthRange(month);
+  const [y, m] = month.split('-').map(Number);
+  if (offDates && offDates.size > 0) {
+    let n = 0;
+    for (let d = 1; d <= daysInMonth; d++) if (!offDates.has(`${month}-${String(d).padStart(2, '0')}`)) n++;
+    return n;
+  }
+  return workingDays(month);
+}
+function remainingWorkingDaysFor(month, fromDate, offDates) {
+  const { daysInMonth } = monthRange(month);
+  const [y, m] = month.split('-').map(Number);
+  let n = 0;
+  for (let d = fromDate; d <= daysInMonth; d++) {
+    const date = `${month}-${String(d).padStart(2, '0')}`;
+    if (offDates && offDates.size > 0) { if (!offDates.has(date)) n++; }
+    else if (new Date(y, m - 1, d).getDay() !== 5) n++;
+  }
+  return n;
+}
 function remainingWorkingDays(month, fromDate) {
   const { daysInMonth } = monthRange(month);
   const [y, m] = month.split('-').map(Number);
@@ -373,6 +405,7 @@ function employeeTotals(empId, month) {
   return row;
 }
 function pct(a, b) { return b > 0 ? Math.round((a / b) * 100) : 0; }
+const fmt0 = n => Math.round(Number(n) || 0).toLocaleString('en-US');
 
 // ---------- Auth ----------
 app.post('/api/login', (req, res) => {
@@ -531,7 +564,7 @@ app.post('/api/daily', requireAuth, (req, res) => {
 function sheetTotalsForMonth(month) {
   const sheetRows = db.prepare("SELECT * FROM sheet_uploads WHERE COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
   const seen = new Set();
-  const sheets = { sales: 0, invoices: 0, coding: 0, preferred: 0, itemsCount: 0, totalQty: 0, files: [], byEmployee: {} };
+  const sheets = { sales: 0, invoices: 0, coding: 0, coded: 0, preferred: 0, itemsCount: 0, totalQty: 0, files: [], byEmployee: {} };
   // The bills sheet and the items sheet are two views of the SAME month's sales.
   // When both exist, the items sheet's total must not be added to branch sales
   // again (its item-level analysis — Preferred, top items, origins — still counts).
@@ -548,17 +581,19 @@ function sheetTotalsForMonth(month) {
     if (!(hasBills && u.type === 'items')) sheets.sales += a.totalSales || 0;
     sheets.invoices += a.totalInvoices || 0;
     sheets.coding += a.totalCoding || 0;
+    sheets.coded += a.totalCoded || 0;
     sheets.preferred += a.preferredValue || 0;
     sheets.itemsCount += a.itemsCount || 0;
     sheets.totalQty += a.totalQty || 0;
     sheets.files.push(u.filename);
     for (const [name, v] of Object.entries(a.byEmployee || {})) {
       const n = String(name).trim();
-      sheets.byEmployee[n] = sheets.byEmployee[n] || { sales: 0, invoices: 0, coding: 0, qty: 0 };
+      sheets.byEmployee[n] = sheets.byEmployee[n] || { sales: 0, invoices: 0, coding: 0, qty: 0, coded: 0 };
       sheets.byEmployee[n].sales += v.sales || 0;
       sheets.byEmployee[n].invoices += v.invoices || 0;
       sheets.byEmployee[n].coding += v.coding || 0;
       sheets.byEmployee[n].qty += v.qty || 0;
+      sheets.byEmployee[n].coded += v.coded || 0;
     }
   }
   return sheets;
@@ -578,18 +613,26 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
   const sheets = sheetTotalsForMonth(month);
   const perEmployee = emps.map(e => {
     const t = employeeTotals(e.id, month);
-    const sh = sheets.byEmployee[e.name.trim()] || { sales: 0, invoices: 0, coding: 0, qty: 0 };
-    t.sales += sh.sales; t.invoices += sh.invoices; t.coding += sh.coding; t.qty = sh.qty || 0;
-    const dailySales = e.monthly_sales / wd;
-    const remainingDays = remainingWorkingDays(month, Math.min(dayNum + 1, monthRange(month).daysInMonth));
+    const offDates = offDaysFor(e.id, month);
+    const wdEmp = workingDaysFor(month, offDates);
+    const sh = sheets.byEmployee[e.name.trim()] || { sales: 0, invoices: 0, coding: 0, qty: 0, coded: 0 };
+    t.sales += sh.sales; t.invoices += sh.invoices; t.coding += sh.coding; t.qty = sh.qty || 0; t.coded = sh.coded || 0;
+    t.codingRate = t.invoices ? Math.round(t.coded / t.invoices * 1000) / 10 : 0;
+    t.codingRateTarget = t.codingRate ? Math.min(100, Math.round(t.codingRate * 1.1 * 10) / 10) : 0;
+    const dailySales = e.monthly_sales / wdEmp;
+    const remainingDays = remainingWorkingDaysFor(month, Math.min(dayNum + 1, monthRange(month).daysInMonth), offDates);
     const tomorrowSales = Math.max(0, Math.round((e.monthly_sales - t.sales) / remainingDays));
-    const idx = Math.round((pct(t.sales, e.monthly_sales) + pct(t.invoices, e.monthly_invoices) + pct(t.coding, e.monthly_coding)) / 3);
+    const idxParts = [];
+    if (e.monthly_sales > 0) idxParts.push(pct(t.sales, e.monthly_sales));
+    if (e.monthly_invoices > 0) idxParts.push(pct(t.invoices, e.monthly_invoices));
+    if (e.monthly_coding > 0) idxParts.push(pct(t.coding, e.monthly_coding));
+    const idx = idxParts.length ? Math.round(idxParts.reduce((a, b) => a + b, 0) / idxParts.length) : 0;
     return {
       id: e.id, name: e.name, username: e.username,
       target: { sales: e.monthly_sales, invoices: e.monthly_invoices, coding: e.monthly_coding },
       achieved: t, index: idx,
       classification: idx >= 90 ? 'ممتاز' : idx >= 70 ? 'على المسار الصحيح' : idx >= 50 ? 'يحتاج دعمًا' : 'متأخر',
-      dailyRequired: { sales: Math.round(dailySales), invoices: Math.round(e.monthly_invoices / wd), coding: Math.round(e.monthly_coding / wd) },
+      dailyRequired: { sales: Math.round(dailySales), invoices: Math.round(e.monthly_invoices / wdEmp), coding: Math.round(e.monthly_coding / wdEmp) },
       tomorrow: { sales: tomorrowSales },
       custom_items: JSON.parse(e.custom_items || '[]'),
     };
@@ -605,6 +648,9 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
   totals.invoices += sheets.invoices - perEmployee.reduce((a, e) => a + (sheets.byEmployee[e.name.trim()]?.invoices || 0), 0);
   totals.coding += sheets.coding - perEmployee.reduce((a, e) => a + (sheets.byEmployee[e.name.trim()]?.coding || 0), 0);
   totals.preferred += sheets.preferred;
+  totals.coded = sheets.coded || 0;
+  totals.codingRate = totals.invoices ? Math.round(totals.coded / totals.invoices * 1000) / 10 : 0;
+  totals.codingRateTarget = totals.codingRate ? Math.min(100, Math.round(totals.codingRate * 1.1 * 10) / 10) : 0;
   const avgInvoice = totals.invoices > 0 ? Math.round(totals.sales / totals.invoices) : 0;
   // Problems auto-detected from real numbers.
   // No per-employee data at all this month (no sheet rows, no daily entries)
@@ -711,11 +757,20 @@ app.get('/api/employee/:id/plan', requireAuth, (req, res) => {
   const month = req.query.month || new Date().toISOString().slice(0, 7);
   const e = db.prepare('SELECT * FROM employees WHERE id=?').get(req.params.id);
   if (!e) return res.status(404).json({ error: 'موظف غير موجود' });
-  const wd = workingDays(month);
+  const offDates = offDaysFor(e.id, month);
+  const wd = workingDaysFor(month, offDates);
   const prev = prevMonthStr(month);
-  const octSheets = sheetTotalsForMonth(prev).byEmployee[e.name.trim()] || { sales: 0, invoices: 0, qty: 0 };
-  const octDaily = employeeTotals(e.id, prev);
-  const oct = { sales: octSheets.sales + octDaily.sales, invoices: octSheets.invoices + octDaily.invoices, qty: octSheets.qty || 0 };
+  let baselineMonth = prev;
+  let octSheets = sheetTotalsForMonth(prev).byEmployee[e.name.trim()] || { sales: 0, invoices: 0, qty: 0 };
+  let octDaily = employeeTotals(e.id, prev);
+  let oct = { sales: octSheets.sales + octDaily.sales, invoices: octSheets.invoices + octDaily.invoices, qty: octSheets.qty || 0 };
+  if (oct.sales === 0 && oct.invoices === 0) {
+    // No data in the previous month (e.g. viewing October itself) — use this month's own data as the baseline.
+    baselineMonth = month;
+    octSheets = sheetTotalsForMonth(month).byEmployee[e.name.trim()] || { sales: 0, invoices: 0, qty: 0 };
+    octDaily = employeeTotals(e.id, month);
+    oct = { sales: octSheets.sales + octDaily.sales, invoices: octSheets.invoices + octDaily.invoices, qty: octSheets.qty || 0 };
+  }
   const octWd = workingDays(prev);
   const atv = oct.invoices > 0 ? oct.sales / oct.invoices : 0;
   const upt = oct.invoices > 0 ? oct.qty / oct.invoices : 0;
@@ -743,7 +798,7 @@ app.get('/api/employee/:id/plan', requireAuth, (req, res) => {
   const days = [];
   for (let d = 1; d <= daysInMonth; d++) {
     const date = `${month}-${String(d).padStart(2, '0')}`;
-    const isWorking = new Date(y, m - 1, d).getDay() !== 5;
+    const isWorking = offDates.size > 0 ? !offDates.has(date) : new Date(y, m - 1, d).getDay() !== 5;
     days.push({ date, day: d, weekday: new Date(y, m - 1, d).getDay(), isWorking,
       required: isWorking ? { sales: dailySales, invoices: dailyInvoices, qty: dailyQty } : null,
       achieved: achievedByDate[date] || null, isPast: date < todayStr, isToday: date === todayStr });
@@ -751,16 +806,127 @@ app.get('/api/employee/:id/plan', requireAuth, (req, res) => {
   const monthAchieved = employeeTotals(e.id, month);
   const sh = sheetTotalsForMonth(month).byEmployee[e.name.trim()] || { sales: 0, invoices: 0, qty: 0 };
   monthAchieved.sales += sh.sales; monthAchieved.invoices += sh.invoices; monthAchieved.qty = sh.qty || 0;
-  const remWd = remainingWorkingDays(month, Math.max(1, Number(todayStr.slice(8, 10))));
+  // Catch-up: shortfall on past working days that have recorded data.
+  let missedDays = 0, shortfallSales = 0, shortfallInvoices = 0;
+  for (const d of days) {
+    if (!d.isWorking || !d.isPast || !d.achieved) continue;
+    if (d.achieved.sales < d.required.sales) {
+      missedDays += 1;
+      shortfallSales += d.required.sales - d.achieved.sales;
+      shortfallInvoices += Math.max(0, d.required.invoices - d.achieved.invoices);
+    }
+  }
+  const remWd = remainingWorkingDaysFor(month, Math.max(1, Number(todayStr.slice(8, 10))), offDates);
+  const compensation = remWd > 0 ? { sales: Math.round(shortfallSales / remWd), invoices: Math.round(shortfallInvoices / remWd * 10) / 10 } : { sales: 0, invoices: 0 };
   const pace = remWd > 0 ? { sales: Math.round(Math.max(0, e.monthly_sales - monthAchieved.sales) / remWd),
     invoices: Math.round(Math.max(0, e.monthly_invoices - monthAchieved.invoices) / remWd * 10) / 10,
     qty: Math.round(Math.max(0, e.monthly_invoices - monthAchieved.invoices) / remWd * upt * 10) / 10 } : { sales: 0, invoices: 0, qty: 0 };
-  res.json({ month, employee: { id: e.id, name: e.name },
+  res.json({ month, baselineMonth, offDays: [...offDates], employee: { id: e.id, name: e.name },
+    compensation: { missedDays, shortfallSales, shortfallInvoices, perDay: compensation },
     target: { sales: e.monthly_sales, invoices: e.monthly_invoices },
     october: { ...oct, workingDays: octWd, atv: Math.round(atv), upt: Math.round(upt * 10) / 10,
       dailySales: octWd ? Math.round(oct.sales / octWd) : 0, dailyInvoices: octWd ? Math.round(oct.invoices / octWd * 10) / 10 : 0 },
     daily: { sales: dailySales, invoices: dailyInvoices, qty: dailyQty },
     achievedMonth: monthAchieved, remainingWorkingDays: remWd, paceFromToday: pace, days });
+});
+
+// 10-day report: strengths & weaknesses for one employee in one 10-day window.
+app.get('/api/employee/:id/ten-day', requireAuth, (req, res) => {
+  const own = ownEmployeeId(req);
+  if (own && Number(req.params.id) !== own) return res.status(403).json({ error: 'غير مسموح' });
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const e = db.prepare('SELECT * FROM employees WHERE id=?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: 'موظف غير موجود' });
+  const [y, m] = month.split('-').map(Number);
+  const { daysInMonth } = monthRange(month);
+  const now = new Date();
+  const curPeriod = month === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}` ? (now.getDate() <= 10 ? 1 : now.getDate() <= 20 ? 2 : 3) : 3;
+  const period = Math.min(3, Math.max(1, Number(req.query.period) || curPeriod));
+  const from = period === 1 ? 1 : period === 2 ? 11 : 21;
+  const to = period === 1 ? 10 : period === 2 ? 20 : daysInMonth;
+  const fromStr = `${month}-${String(from).padStart(2, '0')}`, toStr = `${month}-${String(to).padStart(2, '0')}`;
+  const wd = workingDays(month);
+  const dailySales = wd ? e.monthly_sales / wd : 0;
+  const dailyInv = wd ? e.monthly_invoices / wd : 0;
+  const dailyCod = wd ? e.monthly_coding / wd : 0;
+  let workDays = 0;
+  for (let d = from; d <= to; d++) if (new Date(y, m - 1, d).getDay() !== 5) workDays += 1;
+  const reqSales = Math.round(dailySales * workDays), reqInv = Math.round(dailyInv * workDays), reqCod = Math.round(dailyCod * workDays);
+  // Achieved in the window: manual daily entries + bills-sheet rows (dated).
+  const ach = { sales: 0, invoices: 0, coding: 0, qty: 0, coded: 0, daysRecorded: 0 };
+  const seenDates = new Set();
+  for (const d of db.prepare('SELECT * FROM daily_results WHERE employee_id=? AND date>=? AND date<=?').all(e.id, fromStr, toStr)) {
+    ach.sales += d.sales; ach.invoices += d.invoices; ach.coding += d.coding; seenDates.add(d.date);
+  }
+  ach.daysRecorded = seenDates.size;
+  const uploads = db.prepare("SELECT rows_json FROM sheet_uploads WHERE type='sales' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=?").all(month);
+  let bestDay = null, worstDay = null;
+  const byDate = {};
+  for (const u of uploads) {
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      if (String(row.employee || '').trim() !== e.name.trim() || !row.date || row.date < fromStr || row.date > toStr) continue;
+      ach.sales += Number(row.sales || 0); ach.invoices += Number(row.invoices || 0); ach.qty += Number(row.qty || 0);
+      if (String(row.code || '').trim()) ach.coded += Number(row.invoices || 0);
+      seenDates.add(row.date);
+      byDate[row.date] = (byDate[row.date] || 0) + Number(row.sales || 0);
+    }
+  }
+  ach.daysRecorded = seenDates.size;
+  for (const [date, v] of Object.entries(byDate)) {
+    if (!bestDay || v > bestDay.sales) bestDay = { date, sales: v };
+    if (!worstDay || v < worstDay.sales) worstDay = { date, sales: v };
+  }
+  // Branch averages for the same window (from the month sheets + daily entries).
+  const sheets = sheetTotalsForMonth(month);
+  const branchInv = sheets.invoices || 0;
+  const branchAtv = branchInv ? sheets.sales / branchInv : 0;
+  const branchUpt = branchInv ? (sheets.totalQty || 0) / branchInv : 0;
+  const branchCodingRate = branchInv ? (sheets.coded || 0) / branchInv * 100 : 0;
+  const atv = ach.invoices ? ach.sales / ach.invoices : 0;
+  const upt = ach.invoices ? ach.qty / ach.invoices : 0;
+  const codingRate = ach.invoices ? ach.coded / ach.invoices * 100 : 0;
+  const salesPct = reqSales ? Math.round(ach.sales / reqSales * 100) : 0;
+  const invPct = reqInv ? Math.round(ach.invoices / reqInv * 100) : 0;
+  const codPct = reqCod ? Math.round(ach.coding / reqCod * 100) : 0;
+  const strengths = [], weaknesses = [];
+  if (salesPct >= 100) strengths.push(`حقق ${salesPct}% من مبيعات الفترة المطلوبة (${fmt0(ach.sales)} من ${fmt0(reqSales)} جنيه)`);
+  else if (salesPct >= 80) strengths.push(`قريب من تارجت الفترة: ${salesPct}% من المبيعات المطلوبة`);
+  if (atv > branchAtv && branchAtv > 0) strengths.push(`متوسط فاتورته ${Math.round(atv)} جنيه — أعلى من متوسط الفرع ${Math.round(branchAtv)} جنيه`);
+  if (upt > branchUpt && branchUpt > 0) strengths.push(`بيبيع ${Math.round(upt * 10) / 10} صنف في الفاتورة — أعلى من متوسط الفرع ${Math.round(branchUpt * 10) / 10}`);
+  if (codingRate > branchCodingRate && branchCodingRate > 0) strengths.push(`نسبة الفواتير بكود ${Math.round(codingRate * 10) / 10}% — أعلى من متوسط الفرع ${Math.round(branchCodingRate * 10) / 10}%`);
+  if (invPct >= 100) strengths.push(`حقق ${invPct}% من عدد الفواتير المطلوب في الفترة`);
+  if (bestDay) strengths.push(`أفضل يوم: ${bestDay.date} بمبيعات ${fmt0(bestDay.sales)} جنيه`);
+  if (salesPct < 80) weaknesses.push(`مبيعات الفترة ${salesPct}% بس من المطلوب — ناقص ${fmt0(Math.max(0, reqSales - ach.sales))} جنيه`);
+  if (atv < branchAtv * 0.9 && branchAtv > 0) weaknesses.push(`متوسط فاتورته ${Math.round(atv)} جنيه — أقل من متوسط الفرع ${Math.round(branchAtv)} جنيه (سلال صغيرة)`);
+  if (upt < branchUpt * 0.9 && branchUpt > 0) weaknesses.push(`بيبيع ${Math.round(upt * 10) / 10} صنف في الفاتورة — أقل من متوسط الفرع ${Math.round(branchUpt * 10) / 10} (اقترح أصناف إضافية مع كل فاتورة)`);
+  if (codingRate < branchCodingRate * 0.9 && branchCodingRate > 0) weaknesses.push(`نسبة الفواتير بكود ${Math.round(codingRate * 10) / 10}% — أقل من متوسط الفرع ${Math.round(branchCodingRate * 10) / 10}% (كوّد كل عميل جديد)`);
+  if (invPct < 80) weaknesses.push(`عدد الفواتير ${invPct}% بس من المطلوب — ناقص ${Math.max(0, reqInv - ach.invoices)} فاتورة`);
+  if (ach.daysRecorded < workDays) weaknesses.push(`سجّل نتائج ${ach.daysRecorded} يوم بس من ${workDays} يوم شغل في الفترة`);
+  if (worstDay && worstDay.sales < dailySales * 0.5) weaknesses.push(`أضعف يوم: ${worstDay.date} بمبيعات ${fmt0(worstDay.sales)} جنيه بس`);
+  if (!strengths.length && !weaknesses.length) weaknesses.push('لا توجد بيانات مسجلة في الفترة دي بعد');
+  res.json({ month, period, from: fromStr, to: toStr, employee: { id: e.id, name: e.name },
+    required: { sales: reqSales, invoices: reqInv, coding: reqCod, workingDays: workDays },
+    achieved: ach, salesPct, invPct, codPct,
+    averages: { atv: Math.round(atv), upt: Math.round(upt * 10) / 10, codingRate: Math.round(codingRate * 10) / 10,
+      branchAtv: Math.round(branchAtv), branchUpt: Math.round(branchUpt * 10) / 10, branchCodingRate: Math.round(branchCodingRate * 10) / 10 },
+    strengths, weaknesses });
+});
+
+// Employee-chosen days off: the day off is not fixed — the employee picks it from their own calendar.
+app.get('/api/employee/:id/days-off', requireAuth, (req, res) => {
+  const own = ownEmployeeId(req);
+  if (own && Number(req.params.id) !== own) return res.status(403).json({ error: 'غير مسموح' });
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  res.json({ month, offDays: [...offDaysFor(Number(req.params.id), month)] });
+});
+app.post('/api/employee/:id/day-off', requireAuth, (req, res) => {
+  const own = ownEmployeeId(req);
+  if (own && Number(req.params.id) !== own) return res.status(403).json({ error: 'غير مسموح' });
+  const { date, off } = req.body || {};
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'تاريخ غير صحيح' });
+  if (off) db.prepare('INSERT OR IGNORE INTO employee_days_off (employee_id, date, created_by) VALUES (?,?,?)').run(req.params.id, date, me(req).username);
+  else db.prepare('DELETE FROM employee_days_off WHERE employee_id=? AND date=?').run(req.params.id, date);
+  res.json({ ok: true, off: !!off, date });
 });
 
 // CSV export
@@ -1015,6 +1181,7 @@ function normalizeSalesBillsSheet(ws) {
     const gross = cols['ق.الفاتورة'] !== undefined ? num(r[cols['ق.الفاتورة']]) : 0;
     rows.push({
       date: cols['التاريخ'] !== undefined ? parseDate(r[cols['التاريخ']]) : '',
+      code: cols['الكود'] !== undefined ? String(r[cols['الكود']] ?? '').trim() : '',
       employee: String(r[cols['المستخدم']] ?? '').trim(),
       sales: net || afterDisc || gross,
       invoices: 1,
@@ -1077,20 +1244,22 @@ function analyzeRows(type, rows) {
       byEmployee,
     };
   }
-  let totalSales = 0, totalInvoices = 0, totalCoding = 0, totalQty = 0;
+  let totalSales = 0, totalInvoices = 0, totalCoding = 0, totalQty = 0, totalCoded = 0;
   const byEmployee = {};
   for (const row of rows) {
     const sales = Number(row.sales || row['المبيعات'] || row['مبيعات'] || 0);
     const inv = Number(row.invoices || row['الفواتير'] || row['فواتير'] || 0);
     const cod = Number(row.coding || row['التكويد'] || row['تكويد'] || 0);
     const qty = Number(row.qty || row['الكمية'] || row['عدد القطع'] || 0);
-    totalSales += sales; totalInvoices += inv; totalCoding += cod; totalQty += qty;
+    const coded = String(row.code || row['الكود'] || '').trim() ? inv : 0;
+    totalSales += sales; totalInvoices += inv; totalCoding += cod; totalQty += qty; totalCoded += coded;
     const emp = String(row.employee || row['الموظف'] || 'غير محدد');
-    byEmployee[emp] = byEmployee[emp] || { sales: 0, invoices: 0, coding: 0, qty: 0 };
-    byEmployee[emp].sales += sales; byEmployee[emp].invoices += inv; byEmployee[emp].coding += cod; byEmployee[emp].qty += qty;
+    byEmployee[emp] = byEmployee[emp] || { sales: 0, invoices: 0, coding: 0, qty: 0, coded: 0 };
+    byEmployee[emp].sales += sales; byEmployee[emp].invoices += inv; byEmployee[emp].coding += cod; byEmployee[emp].qty += qty; byEmployee[emp].coded += coded;
   }
   return {
-    totalSales, totalInvoices, totalCoding, totalQty,
+    totalSales, totalInvoices, totalCoding, totalQty, totalCoded,
+    codingRate: totalInvoices ? Math.round(totalCoded / totalInvoices * 1000) / 10 : 0,
     avgInvoiceValue: totalInvoices ? totalSales / totalInvoices : 0,
     avgPiecesPerInvoice: totalInvoices && totalQty ? totalQty / totalInvoices : 0,
     branchSalesPct: pct(totalSales, s.branch_sales),
