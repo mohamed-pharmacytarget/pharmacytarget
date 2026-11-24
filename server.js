@@ -109,6 +109,15 @@ CREATE TABLE IF NOT EXISTS customer_profiles (
   notes TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS cashback_redemptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_code TEXT NOT NULL,
+  employee_id INTEGER,
+  employee_name TEXT NOT NULL DEFAULT '',
+  amount REAL NOT NULL DEFAULT 0,
+  month TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS complaints (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   customer_code TEXT NOT NULL,
@@ -249,6 +258,8 @@ async function syncFromBlob({ force = false } = {}) {
     return true;
   });
 }
+// No-op: Blob persistence is handled by the middleware after every response.
+function persistDb() {}
 async function persistToBlob() {
   if (!blobEnabled) return false;
   return queueBlob(async () => {
@@ -1015,6 +1026,76 @@ app.post('/api/employee/:id/day-off', requireAuth, (req, res) => {
   res.json({ ok: true, off: !!off, date });
 });
 
+// Cashback sheet: one row per customer code — code, name, phone, cashback due,
+// redeemed, remaining, and who redeemed it. Shown on every employee dashboard too.
+app.get('/api/cashback', requireAuth, (req, res) => {
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const loyalty = db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get()
+    || { cashback_rate: 1, gold_min: 5000, vip_min: 20000, cashback_per_500: 25, cashback_step: 500 };
+  const profiles = Object.fromEntries(db.prepare('SELECT * FROM customer_profiles').all().map(r => [r.code, r]));
+  const uploads = db.prepare("SELECT filename, rows_json FROM sheet_uploads WHERE type='sales' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
+  const seenUp = new Set(); const salesByCode = {};
+  for (const u of uploads) {
+    if (seenUp.has(u.filename)) continue; seenUp.add(u.filename);
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      const code = String(row.code || '').trim();
+      if (!code) continue;
+      salesByCode[code] = (salesByCode[code] || 0) + (Number(row.sales || 0) || 0);
+    }
+  }
+  const reds = db.prepare('SELECT * FROM cashback_redemptions WHERE month=? ORDER BY id').all(month);
+  const byCode = {};
+  for (const r of reds) {
+    const b = byCode[r.customer_code] || (byCode[r.customer_code] = { redeemed: 0, lastBy: '', list: [] });
+    b.redeemed += Number(r.amount) || 0; b.lastBy = r.employee_name; b.list.push({ amount: r.amount, employee_name: r.employee_name, created_at: r.created_at });
+  }
+  const rows = Object.entries(salesByCode).map(([code, sales]) => {
+    const prof = profiles[code] || {};
+    const due = cashbackFor(sales, prof.excluded || 0, loyalty);
+    if (due <= 0) return null;
+    const b = byCode[code] || { redeemed: 0, lastBy: '', list: [] };
+    return { code, name: prof.name || '', phone: prof.phone || '', sales: Math.round(sales * 100) / 100,
+      cashback: due, redeemed: Math.round(b.redeemed * 100) / 100,
+      remaining: Math.max(0, Math.round((due - b.redeemed) * 100) / 100), redeemedBy: b.lastBy, redemptions: b.list };
+  }).filter(Boolean).sort((a, b) => b.remaining - a.remaining || b.cashback - a.cashback);
+  res.json({ month, rows,
+    summary: { totalCashback: rows.reduce((a, r) => a + r.cashback, 0), totalRedeemed: rows.reduce((a, r) => a + r.redeemed, 0), totalRemaining: rows.reduce((a, r) => a + r.remaining, 0), customers: rows.length } });
+});
+app.post('/api/cashback/redeem', requireAuth, (req, res) => {
+  const { code, amount, month: m } = req.body || {};
+  const month = m || new Date().toISOString().slice(0, 7);
+  const amt = Number(amount) || 0;
+  if (!String(code || '').trim()) return res.status(400).json({ error: 'الكود مطلوب' });
+  if (amt <= 0) return res.status(400).json({ error: 'المبلغ لازم يكون أكبر من صفر' });
+  const meUser = me(req);
+  const own = ownEmployeeId(req);
+  const empName = own ? (db.prepare('SELECT name FROM employees WHERE id=?').get(own)?.name || meUser.name) : meUser.name;
+  // Recompute the remaining balance for this customer in this month.
+  const cur = awaitCashbackRemaining(String(code).trim(), month);
+  if (!cur) return res.status(404).json({ error: 'العميل ده معندوش كاش باك في الشهر ده' });
+  if (amt > cur.remaining) return res.status(400).json({ error: `المبلغ أكبر من الباقي (${cur.remaining} جنيه)` });
+  db.prepare('INSERT INTO cashback_redemptions (customer_code, employee_id, employee_name, amount, month) VALUES (?,?,?,?,?)')
+    .run(String(code).trim(), own || null, empName, amt, month);
+  persistDb();
+  res.json({ ok: true, remaining: Math.round((cur.remaining - amt) * 100) / 100, redeemedBy: empName });
+});
+function awaitCashbackRemaining(code, month) {
+  const loyalty = db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get()
+    || { cashback_rate: 1, gold_min: 5000, vip_min: 20000, cashback_per_500: 25, cashback_step: 500 };
+  const prof = db.prepare('SELECT * FROM customer_profiles WHERE code=?').get(code) || {};
+  const uploads = db.prepare("SELECT filename, rows_json FROM sheet_uploads WHERE type='sales' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
+  const seenUp = new Set(); let sales = 0;
+  for (const u of uploads) {
+    if (seenUp.has(u.filename)) continue; seenUp.add(u.filename);
+    for (const row of JSON.parse(u.rows_json || '[]'))
+      if (String(row.code || '').trim() === code) sales += Number(row.sales || 0) || 0;
+  }
+  const due = cashbackFor(sales, prof.excluded || 0, loyalty);
+  if (due <= 0) return null;
+  const redeemed = db.prepare('SELECT COALESCE(SUM(amount),0) s FROM cashback_redemptions WHERE customer_code=? AND month=?').get(code, month).s;
+  return { due, redeemed, remaining: Math.max(0, Math.round((due - redeemed) * 100) / 100) };
+}
+
 // Customers dashboard: distinct customers from the bills sheets (by code).
 app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
   const month = req.query.month || new Date().toISOString().slice(0, 7);
@@ -1095,15 +1176,19 @@ app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, r
   // Codes "0" and "1" are generic walk-in codes, not individual customers.
   const generic = c => c.code === '0' || c.code === '1';
   const addDays = (iso, n) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
-  const chronic = customers.filter(c => !generic(c) && c.invoices >= 4).map(c => {
+  const monthEndIso = monthEnd.toISOString().slice(0, 10);
+  const chronic = customers.filter(c => {
+    if (generic(c) || c.invoices < 4) return false;
     const days = [...new Set(c.dates)].sort();
-    let avgGap = 30;
-    if (days.length > 1) {
-      let sum = 0;
-      for (let i = 1; i < days.length; i++) sum += (new Date(days[i]) - new Date(days[i - 1])) / 86400000;
-      avgGap = Math.max(1, Math.round(sum / (days.length - 1)));
-    }
-    return { code: c.code, name: c.name || '', phone: c.phone || '', invoices: c.invoices, sales: Math.round(c.sales * 100) / 100, avgGap, nextCall: addDays(c.lastDate, avgGap), lastDate: c.lastDate };
+    return days.length > 1 && (new Date(days[days.length - 1]) - new Date(days[0])) / 86400000 >= 14;
+  }).map(c => {
+    const days = [...new Set(c.dates)].sort();
+    let sum = 0;
+    for (let i = 1; i < days.length; i++) sum += (new Date(days[i]) - new Date(days[i - 1])) / 86400000;
+    const avgGap = Math.max(1, Math.round(sum / (days.length - 1)));
+    let nextCall = addDays(c.lastDate, avgGap);
+    while (nextCall <= monthEndIso) nextCall = addDays(nextCall, avgGap);
+    return { code: c.code, name: c.name || '', phone: c.phone || '', invoices: c.invoices, sales: Math.round(c.sales * 100) / 100, avgGap, nextCall, lastDate: c.lastDate };
   }).sort((a, b) => a.nextCall.localeCompare(b.nextCall)).slice(0, 30);
   const declining = customers.filter(c => !generic(c)).map(c => {
     const prev = priorByCode[c.code];
