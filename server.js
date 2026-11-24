@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS sheet_uploads (
   employee_id INTEGER,
   rows_json TEXT NOT NULL DEFAULT '[]',
   uploaded_by TEXT,
+  sheet_month TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS change_requests (
@@ -113,6 +114,8 @@ function migrateDb() {
   try {
     const cols = db.prepare("PRAGMA table_info(preferred_items)").all().map(c => c.name);
     if (!cols.includes('category')) db.exec("ALTER TABLE preferred_items ADD COLUMN category TEXT NOT NULL DEFAULT ''");
+    const ucols = db.prepare("PRAGMA table_info(sheet_uploads)").all().map(c => c.name);
+    if (!ucols.includes('sheet_month')) db.exec("ALTER TABLE sheet_uploads ADD COLUMN sheet_month TEXT NOT NULL DEFAULT ''");
   } catch (e) { console.error('migrate failed', e); }
 }
 
@@ -460,7 +463,7 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
   // Sheet totals for this month: latest upload per (type, filename) so re-uploading
   // the same file does not double-count. Items sheets feed branch totals only
   // (they carry no employee names); sales sheets also feed per-employee totals.
-  const sheetRows = db.prepare("SELECT * FROM sheet_uploads WHERE substr(created_at,1,7)=? ORDER BY id DESC").all(month);
+  const sheetRows = db.prepare("SELECT * FROM sheet_uploads WHERE COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
   const seen = new Set();
   const sheets = { sales: 0, invoices: 0, coding: 0, preferred: 0, itemsCount: 0, totalQty: 0, files: [], byEmployee: {} };
   for (const u of sheetRows) {
@@ -663,8 +666,8 @@ app.get('/api/preferred/achievement', requireAuth, (req, res) => {
     const t = employeeTotals(e.id, month);
     // From uploaded items sheets
     let sheetValue = 0; let sheetItems = [];
-    const uploads = db.prepare("SELECT rows_json FROM sheet_uploads WHERE type='items' AND created_at>=? AND created_at<=?")
-      .all(start + ' 00:00:00', end + ' 23:59:59');
+    const uploads = db.prepare("SELECT rows_json FROM sheet_uploads WHERE type='items' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=?")
+      .all(month);
     for (const u of uploads) {
       for (const row of JSON.parse(u.rows_json || '[]')) {
         const empName = String(row.employee || row['الموظف'] || '').trim();
@@ -684,6 +687,7 @@ app.get('/api/preferred/achievement', requireAuth, (req, res) => {
 // ---------- Sheet uploads (Excel / CSV) ----------
 app.post('/api/uploads', requireRole('owner', 'manager', 'superadmin'), upload.single('file'), (req, res) => {
   const type = req.body.type || 'sales'; // sales | items
+  const sheetMonth = /^\d{4}-\d{2}$/.test(req.body.month || '') ? req.body.month : new Date().toISOString().slice(0, 7);
   const employee_id = req.body.employee_id ? Number(req.body.employee_id) : null;
   if (!req.file) return res.status(400).json({ error: 'اختر ملف أكسيل أو CSV' });
   let rows = [];
@@ -698,8 +702,8 @@ app.post('/api/uploads', requireRole('owner', 'manager', 'superadmin'), upload.s
   } catch (e) {
     return res.status(400).json({ error: 'تعذر قراءة الملف' });
   }
-  const r = db.prepare('INSERT INTO sheet_uploads (type, filename, employee_id, rows_json, uploaded_by) VALUES (?, ?, ?, ?, ?)')
-    .run(type, req.file.originalname, employee_id, JSON.stringify(rows), me(req).username);
+  const r = db.prepare('INSERT INTO sheet_uploads (type, filename, employee_id, rows_json, uploaded_by, sheet_month) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(type, req.file.originalname, employee_id, JSON.stringify(rows), me(req).username, sheetMonth);
   audit(me(req).username, 'upload', `رفع شيت ${req.file.originalname} (${type})`);
   res.json({ ok: true, id: r.lastInsertRowid, rows: rows.length, analysis: analyzeRows(type, rows) });
 });
@@ -780,7 +784,7 @@ function analyzeRows(type, rows) {
   };
 }
 app.get('/api/uploads', requireAuth, (req, res) => {
-  const rows = db.prepare('SELECT id, type, filename, employee_id, uploaded_by, created_at, length(rows_json) rows_size FROM sheet_uploads ORDER BY id DESC LIMIT 50').all();
+  const rows = db.prepare('SELECT id, type, filename, employee_id, uploaded_by, sheet_month, created_at, length(rows_json) rows_size FROM sheet_uploads ORDER BY id DESC LIMIT 50').all();
   res.json(rows);
 });
 app.get('/api/uploads/:id/analysis', requireAuth, (req, res) => {
