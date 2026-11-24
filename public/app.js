@@ -103,6 +103,12 @@ async function renderDashboard(v) {
     <table><tr><th>الموظف</th><th>المبيعات</th><th>الفواتير</th><th>التكويد</th><th>المؤشر</th><th>التصنيف</th></tr>
     ${rep.perEmployee.map(e => `<tr><td>${e.name}</td><td>${fmt(e.achieved.sales)} / ${fmt(e.target.sales)}</td><td>${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)}</td><td>${fmt(e.achieved.coding)} / ${fmt(e.target.coding)}</td><td>${e.index}%</td><td><span class="badge">${e.classification}</span></td></tr>`).join('')}
     </table>
+    <h3>🏆 لوحة الصدارة — ${month}</h3>
+    ${rep.leaderboard && rep.leaderboard.some(r => r.achieved.sales > 0 || r.achieved.invoices > 0) ? `
+    <p>الترتيب حسب نسبة تحقيق تارجت المبيعات. الأكثر تحسنًا عن الشهر اللي فات: <b>${[...rep.leaderboard].sort((a, b) => b.improved - a.improved)[0].name} (${[...rep.leaderboard].sort((a, b) => b.improved - a.improved)[0].improved > 0 ? '+' : ''}${[...rep.leaderboard].sort((a, b) => b.improved - a.improved)[0].improved}%)</b></p>
+    <table><tr><th>#</th><th>الموظف</th><th>نسبة التارجت</th><th>المبيعات</th><th>متوسط الفاتورة</th><th>أصناف/فاتورة</th><th>المطلوب يوميًا</th><th>المتوقع آخر الشهر</th><th>التحسن</th></tr>
+    ${rep.leaderboard.map(r => `<tr><td>${r.rank === 1 ? '🥇' : r.rank === 2 ? '🥈' : r.rank === 3 ? '🥉' : r.rank}</td><td>${r.name}</td><td><div style="background:#eee;border-radius:6px;min-width:90px"><div style="background:${r.salesPct >= 90 ? '#2e7d32' : r.salesPct >= 70 ? '#f9a825' : '#c62828'};color:#fff;text-align:center;border-radius:6px;padding:2px 4px;width:${Math.min(100, r.salesPct)}%">${r.salesPct}%</div></div></td><td>${fmt(r.achieved.sales)} / ${fmt(r.target.sales)}</td><td>${fmt(r.atv)} ج</td><td>${r.upt}</td><td>${fmt(r.tomorrow.sales)} ج</td><td>${fmt(r.projection)} ج</td><td>${r.improved > 0 ? '▲ +' + r.improved + '%' : r.improved < 0 ? '▼ ' + r.improved + '%' : '—'}</td></tr>`).join('')}
+    </table>` : '<p>لسه مفيش بيانات للشهر ده — ارفع شيت مبيعات الشهر عشان اللوحة تشتغل.</p>'}
     <h3>تنبيهات</h3>
     ${rep.problems.length ? rep.problems.map(p => `<div class="problem"><b>${p.problem}</b><br>السبب: ${p.cause}<br>الحل: ${p.solution}</div>`).join('') : '<p class="ok">لا توجد مشاكل ظاهرة — الأداء على المسار الصحيح.</p>'}
     <h3>تعديل تارجت الفرع</h3>
