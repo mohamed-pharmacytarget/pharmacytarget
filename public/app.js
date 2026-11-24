@@ -48,11 +48,12 @@ async function loadAll() {
 function renderTabs() {
   const tabs = [['dashboard', 'لوحة التحكم']];
   if (['owner', 'manager', 'superadmin'].includes(user.role)) {
-    tabs.push(['employees', 'إدارة الموظفين'], ['reports', 'تقارير'], ['preferred', 'Preferred List'], ['uploads', 'رفع تقارير أكسيل'], ['audit', 'سجل التعديلات']);
+    tabs.push(['employees', 'إدارة الموظفين'], ['reports', 'تقارير'], ['preferred', 'Preferred List'], ['uploads', 'رفع تقارير أكسيل'], ['customers', 'العملاء']);
   }
   if (user.role === 'employee') tabs.push(['myday', 'تسجيل نتائج اليوم']);
-  if (user.role === 'superadmin') tabs.push(['mohamed', 'لوحة Mohamed']);
-  tabs.push(['catalog', 'كتالوج التشغيل']);
+  if (user.role === 'superadmin') {
+    tabs.push(['mohamed', 'لوحة Mohamed'], ['audit', 'سجل التعديلات'], ['catalog', 'كتالوج التشغيل']);
+  }
   $('#tabs').innerHTML = tabs.map(([id, label]) =>
     `<button data-tab="${id}" class="${tab === id ? 'active' : ''}">${label}</button>`).join('');
   $('#tabs').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { tab = b.dataset.tab; renderTabs(); render(); }));
@@ -69,6 +70,7 @@ async function render() {
   if (tab === 'myday') return renderMyDay(v);
   if (tab === 'mohamed') return renderMohamed(v);
   if (tab === 'catalog') return renderCatalog(v);
+  if (tab === 'customers') return renderCustomers(v);
 }
 
 // ---------- Dashboard ----------
@@ -395,6 +397,34 @@ async function renderPreferred(v) {
     render();
   });
   v.querySelectorAll('[data-delpref]').forEach(b => b.addEventListener('click', async () => { await api(`/api/preferred/${b.dataset.delpref}`, { method: 'DELETE' }); render(); }));
+}
+
+// ---------- Customers ----------
+async function renderCustomers(v) {
+  const data = await api(`/api/customers?month=${month}`);
+  const sm = data.summary;
+  let q = '';
+  const draw = () => {
+    const list = data.customers.filter(c => !q || c.code.includes(q) || (c.name || '').includes(q));
+    v.innerHTML = `<div class="card"><h2>العملاء — ${month}</h2>
+    <label>الشهر <input type="month" id="cust-month" value="${month}"></label>
+    <div class="grid">
+      <div class="stat">عدد العملاء<b>${fmt(sm.totalCustomers)}</b></div>
+      <div class="stat">عملاء جدد<b>${fmt(sm.newCustomers)}</b></div>
+      <div class="stat">فواتير بكود<b>${fmt(sm.codedInvoices)} / ${fmt(sm.totalInvoices)}</b>${sm.codingRate}%</div>
+      <div class="stat">فواتير بدون كود<b>${fmt(sm.uncodedInvoices)}</b>${fmt(sm.uncodedSales)} ج</div>
+      <div class="stat">مبيعات العملاء المكوّدين<b>${fmt(sm.totalSales)} ج</b></div>
+    </div>
+    <label>بحث بالكود أو الاسم <input id="cust-q" value="${q}" placeholder="مثال: 12345"></label>
+    ${list.length ? `<table><tr><th>الكود</th><th>الاسم</th><th>الفواتير</th><th>إجمالي المشتريات</th><th>أول زيارة</th><th>آخر زيارة</th><th>الموظف الأساسي</th><th></th></tr>
+    ${list.slice(0, 200).map(c => `<tr><td>${c.code}</td><td>${c.name || '—'}</td><td>${c.invoices}</td><td>${fmt(c.sales)} ج</td><td>${c.firstDate || '—'}</td><td>${c.lastDate || '—'}</td><td>${c.topEmployee}</td><td>${c.isNew ? '<span class="badge">جديد</span>' : ''}</td></tr>`).join('')}
+    </table>${list.length > 200 ? `<p class="muted">معروض أول 200 عميل من ${list.length} — ضيّق البحث عشان تشوف الباقي.</p>` : ''}` : '<p>لا يوجد عملاء في الشهر ده — ارفع شيت فواتير الشهر.</p>'}
+    <p class="muted">البيانات من شيت فواتير المبيعات. العميل "جديد" يعني كوده أول مرة يظهر في الشيتات.</p></div>`;
+    $('#cust-month').addEventListener('change', (e) => { month = e.target.value; render(); });
+    const qEl = $('#cust-q');
+    qEl.addEventListener('input', () => { q = qEl.value; const pos = qEl.selectionStart; draw(); const nq = $('#cust-q'); nq.focus(); nq.setSelectionRange(pos, pos); });
+  };
+  draw();
 }
 
 // ---------- Uploads ----------
