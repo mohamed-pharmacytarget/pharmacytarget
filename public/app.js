@@ -156,7 +156,25 @@ async function renderEmployeeStats(el, empId) {
     <p>الفواتير: ${fmt(dayInv)} / ${fmt(e.dailyRequired.invoices)} — ${ok(dayInv, e.dailyRequired.invoices)}</p>
     <p>التكويد: ${fmt(dayCod)} / ${fmt(e.dailyRequired.coding)} — ${ok(dayCod, e.dailyRequired.coding)}</p>
     <p><b>مطلوب الغد:</b> مبيعات ${fmt(e.tomorrow.sales)} جنيه (وباقي البنود بنفس طريقة الحساب من المتبقي الشهري ÷ الأيام المتبقية).</p>
-    ${e.custom_items.length ? `<h3>بنود خاصة بي</h3><ul>${e.custom_items.map(i => `<li>${i.name} — تارجت ${fmt(i.target)}</li>`).join('')}</ul>` : ''}`;
+    ${e.custom_items.length ? `<h3>بنود خاصة بي</h3><ul>${e.custom_items.map(i => `<li>${i.name} — تارجت ${fmt(i.target)}</li>`).join('')}</ul>` : ''}
+    <div id="emp-plan"></div>`;
+  try {
+    const plan = await api(`/api/employee/${empId}/plan?month=${month}`);
+    const wdShort = ['أحد', 'اثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'];
+    const pad = (plan.days[0].weekday + 1) % 7;
+    const cells = Array(pad).fill('<div></div>').concat(plan.days.map(d => {
+      if (!d.isWorking) return `<div style="border:1px solid #ddd;border-radius:8px;padding:6px;background:#f5f5f5"><b>${d.day}</b> <span class="muted">${wdShort[d.weekday]}</span><br><span class="muted">إجازة</span></div>`;
+      const a = d.achieved;
+      const ok = a && a.sales >= d.required.sales;
+      const achHtml = a ? `<br>${ok ? '✓' : '✗'} حقق: ${fmt(a.sales)} ج` : (d.isPast ? '<br><span class="muted">لم يسجّل</span>' : '');
+      return `<div style="border:1px solid #ddd;border-radius:8px;padding:6px;${d.isToday ? 'border-color:#0b7a62;border-width:2px' : ''};${a ? (ok ? 'background:#e8f5e9' : 'background:#fce8e8') : ''}"><b>${d.day}</b> <span class="muted">${wdShort[d.weekday]}</span>${d.isToday ? ' • اليوم' : ''}<br>مطلوب: ${fmt(d.required.sales)} ج<br>${d.required.invoices} فاتورة • ${d.required.qty} صنف${achHtml}</div>`;
+    }));
+    const el2 = document.getElementById('emp-plan');
+    if (el2) el2.innerHTML = `<h3>📅 خطة الشهر — ${plan.month}</h3>
+      <p>بناء على أكتوبر: متوسط فاتورتك ${fmt(plan.october.atv)} ج، ${plan.october.upt} صنف/فاتورة، وكنت بتبيع ${fmt(plan.october.dailySales)} ج في اليوم. مطلوب منك يوميًا في ${plan.month}: <b>${fmt(plan.daily.sales)} ج</b>، <b>${plan.daily.invoices} فاتورة</b>، <b>${plan.daily.qty} صنف</b>.</p>
+      ${plan.month === new Date().toISOString().slice(0, 7) ? `<p>المتبقي من التارجت: ${fmt(Math.max(0, plan.target.sales - plan.achievedMonth.sales))} ج — عشان تلحق، مطلوب من النهاردة <b>${fmt(plan.paceFromToday.sales)} ج</b> في اليوم (${plan.paceFromToday.invoices} فاتورة، ${plan.paceFromToday.qty} صنف).</p>` : ''}
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px">${cells.join('')}</div>`;
+  } catch (err) { /* plan is optional; stats above already show */ }
 }
 
 // ---------- Employees (Add Employee unified) ----------
@@ -310,6 +328,7 @@ async function renderPreferred(v) {
   for (const i of items) { const c = i.category || 'بدون فئة'; if (!cats.find(x => x.name === c)) cats.push({ name: c, items: [] }); cats.find(x => x.name === c).items.push(i); }
   const sharePct = rep && rep.totals.sales > 0 ? Math.round(rep.totals.preferred / rep.totals.sales * 1000) / 10 : 0;
   v.innerHTML = `<div class="card"><h2>Preferred List — ${month}</h2>
+    <label>الشهر <input type="month" id="pref-month" value="${month}"></label>
     ${canEdit && rep && prefSales ? `
     <h3>مبيعات الـ Preferred في ${month}</h3>
     <div class="grid">
@@ -333,6 +352,7 @@ async function renderPreferred(v) {
     <table><tr><th>الموظف</th><th>من التسجيل اليومي</th><th>من شيت الأصناف</th><th>الإجمالي</th></tr>
     ${ach.map(a => `<tr><td>${a.name}</td><td>${fmt(a.dailyPreferred)}</td><td>${fmt(a.sheetPreferred)}</td><td><b>${fmt(a.totalPreferred)}</b></td></tr>`).join('')}
     </table></div>`;
+  $('#pref-month').addEventListener('change', (e) => { month = e.target.value; render(); });
   const form = $('#pref-form');
   if (form) form.addEventListener('submit', async (e) => { e.preventDefault(); await api('/api/preferred', { method: 'POST', body: JSON.stringify({ name: $('#pref-name').value, price: $('#pref-price').value, category: $('#pref-cat').value }) }); render(); });
   const upForm = $('#pref-up-form');
