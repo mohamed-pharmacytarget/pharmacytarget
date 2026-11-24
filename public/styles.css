@@ -30,3 +30,18 @@ th{background:#f2f4f7}
 .problem{background:#fef3f2;border:1px solid #fecdca;border-radius:10px;padding:12px;margin:8px 0}
 .good{background:#ecfdf3;border:1px solid #a6f4c5;border-radius:10px;padding:12px;margin:8px 0}
 @media(max-width:600px){.verse-text{font-size:17px}main{padding:10px}}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
+.cal-head{text-align:center;font-weight:bold;color:#0b7a62;padding:4px}
+.cal-cell{border:1px solid #e0e0e0;border-radius:12px;padding:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);min-height:118px}
+.cal-cell.cal-today{border:2px solid #0b7a62}
+.cal-cell.cal-ok{background:#e8f5e9}
+.cal-cell.cal-bad{background:#fce8e8}
+.cal-cell.cal-off-day{background:#f0f0f0;color:#888}
+.cal-day{font-size:16px;margin-bottom:4px}
+.cal-day span{color:#888;font-size:13px}
+.cal-line{margin-top:5px;font-size:13px;line-height:1.5}
+.cal-today-badge{background:#0b7a62;color:#fff;border-radius:10px;padding:1px 7px;font-size:11px}
+.cal-off{font-size:11px;padding:2px 8px;margin-top:8px}
+@media(max-width:900px){.cal-grid{grid-template-columns:repeat(3,1fr)}.cal-head{display:none}}
+@media(max-width:560px){.cal-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:380px){.cal-grid{grid-template-columns:1fr}}

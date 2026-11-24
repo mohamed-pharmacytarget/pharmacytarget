@@ -142,22 +142,34 @@ async function renderEmployeeStats(el, empId) {
   const myPref = pref.find(p => p.employee_id === empId);
   const daySales = t ? t.sales : 0, dayInv = t ? t.invoices : 0, dayCod = t ? t.coding : 0;
   const ok = (a, b) => a >= b ? '✓ اتحقق' : '✗ لم يتحقق';
+  const isPast = month < new Date().toISOString().slice(0, 7);
+  const daysInMonth = new Date(+month.split('-')[0], +month.split('-')[1], 0).getDate();
+  const salesPct = e.target.sales ? Math.round(e.achieved.sales / e.target.sales * 100) : 0;
+  const invPct = e.target.invoices ? Math.round(e.achieved.invoices / e.target.invoices * 100) : 0;
   el.innerHTML = `
     <h2>${e.name} — ${month}</h2>
     <div class="grid">
       <div class="stat">مبيعات الشهر<b>${fmt(e.achieved.sales)} / ${fmt(e.target.sales)}</b>${e.index}%</div>
       <div class="stat">فواتير الشهر<b>${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)}</b></div>
       <div class="stat">نسبة الفواتير بكود<b>${e.achieved.codingRate || 0}%</b></div>
+      ${isPast ? `
+      <div class="stat">متوسط المبيعات اليومي<b>${fmt(Math.round(e.achieved.sales / daysInMonth))} ج</b></div>
+      <div class="stat">متوسط الفواتير اليومي<b>${fmt(Math.round(e.achieved.invoices / daysInMonth))}</b></div>
+      <div class="stat">متوسط الفاتورة<b>${fmt(e.achieved.invoices ? Math.round(e.achieved.sales / e.achieved.invoices) : 0)} ج</b></div>` : `
       <div class="stat">المطلوب اليوم — مبيعات<b>${fmt(e.dailyRequired.sales)} ج</b></div>
       <div class="stat">المطلوب اليوم — فواتير<b>${fmt(e.dailyRequired.invoices)}</b></div>
-      <div class="stat">المطلوب اليوم — تكويد<b>${fmt(e.dailyRequired.coding)}</b></div>
+      <div class="stat">المطلوب اليوم — تكويد<b>${fmt(e.dailyRequired.coding)}</b></div>`}
       <div class="stat">Preferred هذا الشهر<b>${fmt(myPref ? myPref.totalPreferred : 0)} ج</b></div>
     </div>
-    ${(() => { const [yy, mm] = month.split('-').map(Number); const lastDay = new Date(yy, mm, 0).getDate(); const isCurrent = month === new Date().toISOString().slice(0, 7); const repDate = isCurrent ? today() : `${month}-${String(lastDay).padStart(2, '0')}`; return `<h3>تقرير نهاية اليوم (${repDate})</h3>
+    ${isPast ? `<h3>📋 تقرير الشهر الكامل — النتيجة النهائية</h3>
+    <p>المبيعات: ${fmt(e.achieved.sales)} / ${fmt(e.target.sales)} (${salesPct}%) — ${e.achieved.sales >= e.target.sales ? '✓ التارجت متحقق' : '✗ التارجت لم يتحقق'}</p>
+    <p>الفواتير: ${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)} (${invPct}%)</p>
+    <p>نسبة الفواتير بكود: ${e.achieved.codingRate || 0}% — فواتير بكود: ${fmt(e.achieved.coded || 0)} من ${fmt(e.achieved.invoices)} (تارجت النسبة الشهر الجاي: ${e.achieved.codingRateTarget || 0}%)</p>
+    <p>متوسط الفاتورة: ${fmt(e.achieved.invoices ? Math.round(e.achieved.sales / e.achieved.invoices) : 0)} جنيه — Preferred هذا الشهر: ${fmt(myPref ? myPref.totalPreferred : 0)} جنيه — المؤشر المركب: ${e.index}% (${e.classification})</p>` : (() => { const repDate = today(); return `<h3>تقرير نهاية اليوم (${repDate})</h3>
     <p>المبيعات: ${fmt(daySales)} / ${fmt(e.dailyRequired.sales)} — ${ok(daySales, e.dailyRequired.sales)}</p>
     <p>الفواتير: ${fmt(dayInv)} / ${fmt(e.dailyRequired.invoices)} — ${ok(dayInv, e.dailyRequired.invoices)}</p>
     <p>التكويد: ${fmt(dayCod)} / ${fmt(e.dailyRequired.coding)} — ${ok(dayCod, e.dailyRequired.coding)}</p>
-    ${isCurrent ? `<p><b>مطلوب الغد:</b> مبيعات ${fmt(e.tomorrow.sales)} جنيه (وباقي البنود بنفس طريقة الحساب من المتبقي الشهري ÷ الأيام المتبقية).</p>` : `<p class="muted">الشهر ده خلص — دي النتيجة النهائية.</p>`}`; })()}
+    <p><b>مطلوب الغد:</b> مبيعات ${fmt(e.tomorrow.sales)} جنيه (وباقي البنود بنفس طريقة الحساب من المتبقي الشهري ÷ الأيام المتبقية).</p>`; })()}
     <div class="card"><b>التكويد:</b> تارجتك ${fmt(e.target.coding)} من الـ 1,000 — حققت ${fmt(e.achieved.coded || 0)} فاتورة بكود (${e.achieved.codingRate || 0}% من فواتيرك)${e.achieved.codingRateTarget ? ` — تارجت النسبة الشهر الجاي: ${e.achieved.codingRateTarget}%` : ''}</div>
     ${e.custom_items.length ? `<h3>بنود خاصة بي</h3><ul>${e.custom_items.map(i => `<li>${i.name} — تارجت ${fmt(i.target)}</li>`).join('')}</ul>` : ''}
     <div id="emp-plan"></div>`;
@@ -166,25 +178,26 @@ async function renderEmployeeStats(el, empId) {
     const wdShort = ['أحد', 'اثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'];
     const wdHead = ['سبت', 'أحد', 'اثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة'];
     const baseName = plan.baselineMonth === plan.month ? 'نفس الشهر' : plan.baselineMonth;
+    const isPastMonth = plan.month < new Date().toISOString().slice(0, 7);
     const pad = (plan.days[0].weekday + 1) % 7;
     const cells = Array(pad).fill('<div></div>').concat(plan.days.map(d => {
-      const offBtn = `<br><button class="secondary" style="font-size:11px;padding:2px 8px;margin-top:4px" data-off="${d.date}" data-isoff="${d.isWorking ? 0 : 1}">${d.isWorking ? 'Off' : 'إلغاء الإجازة'}</button>`;
-      if (!d.isWorking) return `<div style="border:1px solid #ddd;border-radius:10px;padding:8px;background:#f0f0f0;color:#888"><b>${d.day}</b> <span>${wdShort[d.weekday]}</span><br>🌙 إجازة${offBtn}</div>`;
+      const offBtn = isPastMonth ? '' : `<button class="secondary cal-off" data-off="${d.date}" data-isoff="${d.isWorking ? 0 : 1}">${d.isWorking ? 'Off' : 'إلغاء الإجازة'}</button>`;
+      if (!d.isWorking) return `<div class="cal-cell cal-off-day"><div class="cal-day"><b>${d.day}</b> <span>${wdShort[d.weekday]}</span></div><div class="cal-line">🌙 إجازة</div>${offBtn}</div>`;
       const a = d.achieved;
-      const ok = a && a.sales >= d.required.sales;
-      const short = a && !ok ? `<br><span style="color:#c62828">قصّر بـ ${fmt(d.required.sales - a.sales)} ج</span>` : '';
-      const achHtml = a ? `<br>${ok ? '✅' : '❌'} حقق: ${fmt(a.sales)} ج${short}` : (d.isPast ? '<br><span style="color:#999">لم يسجّل</span>' : '');
-      return `<div style="border:1px solid #e0e0e0;border-radius:10px;padding:8px;box-shadow:0 1px 3px rgba(0,0,0,.08);${d.isToday ? 'border:2px solid #0b7a62;' : ''}${a ? (ok ? 'background:#e8f5e9' : 'background:#fce8e8') : ''}"><b>${d.day}</b> <span style="color:#888">${wdShort[d.weekday]}</span>${d.isToday ? ' <span style="background:#0b7a62;color:#fff;border-radius:10px;padding:1px 7px;font-size:11px">اليوم</span>' : ''}<br><span style="font-size:13px">مطلوب: <b>${fmt(d.required.sales)} ج</b></span><br><span style="font-size:12px;color:#555">${d.required.invoices} فاتورة • ${d.required.qty} صنف</span>${achHtml}${offBtn}</div>`;
+      const okDay = a && a.sales >= d.required.sales;
+      const short = a && !okDay ? `<div class="cal-line" style="color:#c62828">قصّر بـ ${fmt(d.required.sales - a.sales)} ج</div>` : '';
+      const achHtml = a ? `<div class="cal-line">${okDay ? '✅' : '❌'} حقق: <b>${fmt(a.sales)} ج</b></div>${short}` : (d.isPast ? '<div class="cal-line" style="color:#999">لم يسجّل</div>' : '');
+      return `<div class="cal-cell${d.isToday ? ' cal-today' : ''}${a ? (okDay ? ' cal-ok' : ' cal-bad') : ''}"><div class="cal-day"><b>${d.day}</b> <span>${wdShort[d.weekday]}</span>${d.isToday ? ' <span class="cal-today-badge">اليوم</span>' : ''}</div><div class="cal-line">مطلوب: <b>${fmt(d.required.sales)} ج</b></div><div class="cal-line muted">${d.required.invoices} فاتورة • ${d.required.qty} صنف</div>${achHtml}${offBtn}</div>`;
     }));
     const comp = plan.compensation;
     const el2 = document.getElementById('emp-plan');
     if (el2) el2.innerHTML = `<h3>📅 خطة الشهر — ${plan.month}</h3>
-      <p>بناء على ${baseName}: متوسط فاتورتك ${fmt(plan.october.atv)} ج، ${plan.october.upt} صنف/فاتورة، وكنت بتبيع ${fmt(plan.october.dailySales)} ج في اليوم. مطلوب منك يوميًا في ${plan.month}: <b>${fmt(plan.daily.sales)} ج</b>، <b>${plan.daily.invoices} فاتورة</b>، <b>${plan.daily.qty} صنف</b>.</p>
-      <p class="muted">يوم الإجازة مش ثابت — دوس Off على أي يوم في الكاليندر عشان تاخده إجازة، والمطلوب اليومي هيتعدل لوحده على باقي أيام الشغل.</p>
-      ${comp && comp.missedDays > 0 ? `<div style="background:#fff3e0;border:1px solid #ffcc80;border-radius:10px;padding:10px;margin:8px 0"><b>⚠️ تعويض:</b> قصّرت في ${comp.missedDays} يوم بإجمالي ${fmt(comp.shortfallSales)} جنيه (${fmt(comp.shortfallInvoices)} فاتورة) — عشان تعوّض، زوّد <b>${fmt(comp.perDay.sales)} جنيه</b> كل يوم شغل لحد آخر الشهر.</div>` : ''}
+      <p>بناء على ${baseName}: متوسط فاتورتك ${fmt(plan.october.atv)} ج، ${plan.october.upt} صنف/فاتورة، وكنت بتبيع ${fmt(plan.october.dailySales)} ج في اليوم. ${isPastMonth ? 'كان مطلوب' : 'مطلوب'} منك يوميًا في ${plan.month}: <b>${fmt(plan.daily.sales)} ج</b>، <b>${plan.daily.invoices} فاتورة</b>، <b>${plan.daily.qty} صنف</b>.</p>
+      ${isPastMonth ? '' : `<p class="muted">يوم الإجازة مش ثابت — دوس Off على أي يوم في الكاليندر عشان تاخده إجازة، والمطلوب اليومي هيتعدل لوحده على باقي أيام الشغل.</p>`}
+      ${comp && comp.missedDays > 0 ? (isPastMonth ? `<div style="background:#fff3e0;border:1px solid #ffcc80;border-radius:10px;padding:10px;margin:8px 0"><b>⚠️ تقصير الشهر:</b> قصّرت في ${comp.missedDays} يوم بإجمالي ${fmt(comp.shortfallSales)} جنيه (${fmt(comp.shortfallInvoices)} فاتورة) — دي كانت تكلفة القصور في الشهر ده.</div>` : `<div style="background:#fff3e0;border:1px solid #ffcc80;border-radius:10px;padding:10px;margin:8px 0"><b>⚠️ تعويض:</b> قصّرت في ${comp.missedDays} يوم بإجمالي ${fmt(comp.shortfallSales)} جنيه (${fmt(comp.shortfallInvoices)} فاتورة) — عشان تعوّض، زوّد <b>${fmt(comp.perDay.sales)} جنيه</b> كل يوم شغل لحد آخر الشهر.</div>`) : ''}
       ${plan.month === new Date().toISOString().slice(0, 7) ? `<p>المتبقي من التارجت: ${fmt(Math.max(0, plan.target.sales - plan.achievedMonth.sales))} ج — عشان تلحق، مطلوب من النهاردة <b>${fmt(plan.paceFromToday.sales)} ج</b> في اليوم (${plan.paceFromToday.invoices} فاتورة، ${plan.paceFromToday.qty} صنف).</p>` : ''}
       <p style="font-size:12px;color:#888">✅ حقق المطلوب &nbsp; ❌ قصّر &nbsp; لم يسجّل &nbsp; 🌙 إجازة</p>
-      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px">${wdHead.map(w => `<div style="text-align:center;font-weight:bold;color:#0b7a62;padding:4px">${w}</div>`).join('')}${cells.join('')}</div>
+      <div class="cal-grid">${wdHead.map(w => `<div class="cal-head">${w}</div>`).join('')}${cells.join('')}</div>
       <div id="emp-ten"></div>`;
     el2.querySelectorAll('[data-off]').forEach(b => b.addEventListener('click', async () => {
       await api(`/api/employee/${empId}/day-off`, { method: 'POST', body: JSON.stringify({ date: b.dataset.off, off: b.dataset.isoff === '0' }) });
