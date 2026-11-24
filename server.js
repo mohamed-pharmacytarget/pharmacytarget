@@ -929,6 +929,55 @@ app.post('/api/employee/:id/day-off', requireAuth, (req, res) => {
   res.json({ ok: true, off: !!off, date });
 });
 
+// Customers dashboard: distinct customers from the bills sheets (by code).
+app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const byCode = {};
+  const priorCodes = new Set();
+  const allUploads = db.prepare("SELECT rows_json, COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7)) m FROM sheet_uploads WHERE type='sales' ORDER BY id").all();
+  for (const u of allUploads) {
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      const code = String(row.code || '').trim();
+      if (!code) continue;
+      if (u.m < month) priorCodes.add(code);
+    }
+  }
+  const uploads = db.prepare("SELECT filename, rows_json FROM sheet_uploads WHERE type='sales' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
+  const seenUp = new Set();
+  let totalInvoices = 0, codedInvoices = 0, uncodedInvoices = 0, uncodedSales = 0;
+  for (const u of uploads) {
+    if (seenUp.has(u.filename)) continue;
+    seenUp.add(u.filename);
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      totalInvoices += 1;
+      const code = String(row.code || '').trim();
+      const sales = Number(row.sales || 0);
+      if (!code) { uncodedInvoices += 1; uncodedSales += sales; continue; }
+      codedInvoices += 1;
+      const c = byCode[code] || (byCode[code] = { code, name: '', invoices: 0, sales: 0, firstDate: row.date || '', lastDate: row.date || '', employees: {} });
+      c.invoices += 1; c.sales += sales;
+      if (row.customer) c.name = row.customer;
+      if (row.date) {
+        if (!c.firstDate || row.date < c.firstDate) c.firstDate = row.date;
+        if (!c.lastDate || row.date > c.lastDate) c.lastDate = row.date;
+      }
+      const emp = String(row.employee || '').trim() || 'غير محدد';
+      c.employees[emp] = (c.employees[emp] || 0) + 1;
+    }
+  }
+  const customers = Object.values(byCode).map(c => ({
+    ...c,
+    topEmployee: Object.entries(c.employees).sort((a, b) => b[1] - a[1])[0]?.[0] || '',
+    isNew: !priorCodes.has(c.code),
+  })).sort((a, b) => b.sales - a.sales);
+  res.json({ month,
+    summary: { totalCustomers: customers.length, newCustomers: customers.filter(c => c.isNew).length,
+      totalInvoices, codedInvoices, uncodedInvoices, uncodedSales,
+      codingRate: totalInvoices ? Math.round(codedInvoices / totalInvoices * 1000) / 10 : 0,
+      totalSales: customers.reduce((a, c) => a + c.sales, 0) },
+    customers });
+});
+
 // CSV export
 app.get('/api/export.csv', requireAuth, (req, res) => {
   const month = req.query.month || new Date().toISOString().slice(0, 7);
@@ -1182,6 +1231,7 @@ function normalizeSalesBillsSheet(ws) {
     rows.push({
       date: cols['التاريخ'] !== undefined ? parseDate(r[cols['التاريخ']]) : '',
       code: cols['الكود'] !== undefined ? String(r[cols['الكود']] ?? '').trim() : '',
+      customer: cols['العميل'] !== undefined ? String(r[cols['العميل']] ?? '').trim() : '',
       employee: String(r[cols['المستخدم']] ?? '').trim(),
       sales: net || afterDisc || gross,
       invoices: 1,
