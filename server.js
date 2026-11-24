@@ -703,6 +703,66 @@ app.get('/api/coach/:employee_id', requireAuth, (req, res) => {
   res.json({ employee: e.name, tips });
 });
 
+// Monthly plan calendar for one employee: daily required sales/invoices/items
+// (from their target and their October behaviour) + achieved per day.
+app.get('/api/employee/:id/plan', requireAuth, (req, res) => {
+  const own = ownEmployeeId(req);
+  if (own && Number(req.params.id) !== own) return res.status(403).json({ error: 'غير مسموح' });
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const e = db.prepare('SELECT * FROM employees WHERE id=?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: 'موظف غير موجود' });
+  const wd = workingDays(month);
+  const prev = prevMonthStr(month);
+  const octSheets = sheetTotalsForMonth(prev).byEmployee[e.name.trim()] || { sales: 0, invoices: 0, qty: 0 };
+  const octDaily = employeeTotals(e.id, prev);
+  const oct = { sales: octSheets.sales + octDaily.sales, invoices: octSheets.invoices + octDaily.invoices, qty: octSheets.qty || 0 };
+  const octWd = workingDays(prev);
+  const atv = oct.invoices > 0 ? oct.sales / oct.invoices : 0;
+  const upt = oct.invoices > 0 ? oct.qty / oct.invoices : 0;
+  const dailySales = wd ? Math.round(e.monthly_sales / wd) : 0;
+  const dailyInvoices = wd ? Math.round(e.monthly_invoices / wd * 10) / 10 : 0;
+  const dailyQty = Math.round(dailyInvoices * upt * 10) / 10;
+  // Achieved per day: manual daily entries + bills-sheet rows (which carry dates).
+  const achievedByDate = {};
+  const { start, end } = monthRange(month);
+  for (const d of db.prepare('SELECT * FROM daily_results WHERE employee_id=? AND date>=? AND date<=?').all(e.id, start, end)) {
+    achievedByDate[d.date] = { sales: d.sales, invoices: d.invoices, qty: 0 };
+  }
+  const uploads = db.prepare("SELECT rows_json FROM sheet_uploads WHERE type='sales' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=?").all(month);
+  const seenFiles = new Set();
+  for (const u of uploads) {
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      if (String(row.employee || '').trim() !== e.name.trim() || !row.date) continue;
+      const a = achievedByDate[row.date] || (achievedByDate[row.date] = { sales: 0, invoices: 0, qty: 0 });
+      a.sales += Number(row.sales || 0); a.invoices += Number(row.invoices || 0); a.qty += Number(row.qty || 0);
+    }
+  }
+  const { daysInMonth } = monthRange(month);
+  const [y, m] = month.split('-').map(Number);
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const days = [];
+  for (let d = 1; d <= daysInMonth; d++) {
+    const date = `${month}-${String(d).padStart(2, '0')}`;
+    const isWorking = new Date(y, m - 1, d).getDay() !== 5;
+    days.push({ date, day: d, weekday: new Date(y, m - 1, d).getDay(), isWorking,
+      required: isWorking ? { sales: dailySales, invoices: dailyInvoices, qty: dailyQty } : null,
+      achieved: achievedByDate[date] || null, isPast: date < todayStr, isToday: date === todayStr });
+  }
+  const monthAchieved = employeeTotals(e.id, month);
+  const sh = sheetTotalsForMonth(month).byEmployee[e.name.trim()] || { sales: 0, invoices: 0, qty: 0 };
+  monthAchieved.sales += sh.sales; monthAchieved.invoices += sh.invoices; monthAchieved.qty = sh.qty || 0;
+  const remWd = remainingWorkingDays(month, Math.max(1, Number(todayStr.slice(8, 10))));
+  const pace = remWd > 0 ? { sales: Math.round(Math.max(0, e.monthly_sales - monthAchieved.sales) / remWd),
+    invoices: Math.round(Math.max(0, e.monthly_invoices - monthAchieved.invoices) / remWd * 10) / 10,
+    qty: Math.round(Math.max(0, e.monthly_invoices - monthAchieved.invoices) / remWd * upt * 10) / 10 } : { sales: 0, invoices: 0, qty: 0 };
+  res.json({ month, employee: { id: e.id, name: e.name },
+    target: { sales: e.monthly_sales, invoices: e.monthly_invoices },
+    october: { ...oct, workingDays: octWd, atv: Math.round(atv), upt: Math.round(upt * 10) / 10,
+      dailySales: octWd ? Math.round(oct.sales / octWd) : 0, dailyInvoices: octWd ? Math.round(oct.invoices / octWd * 10) / 10 : 0 },
+    daily: { sales: dailySales, invoices: dailyInvoices, qty: dailyQty },
+    achievedMonth: monthAchieved, remainingWorkingDays: remWd, paceFromToday: pace, days });
+});
+
 // CSV export
 app.get('/api/export.csv', requireAuth, (req, res) => {
   const month = req.query.month || new Date().toISOString().slice(0, 7);
@@ -936,6 +996,16 @@ function normalizeSalesBillsSheet(ws) {
   }
   if (hi < 0) return null;
   const num = v => { const n = Number(String(v ?? '').replace(/[^0-9.\-]/g, '')); return isNaN(n) ? 0 : n; };
+  const parseDate = v => {
+    if (v === undefined || v === null || v === '') return '';
+    if (typeof v === 'number' && v > 30000 && v < 60000) {
+      const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+      return d.toISOString().slice(0, 10);
+    }
+    const m = String(v).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    return '';
+  };
   const rows = [];
   for (const r of arr.slice(hi + 1)) {
     const billNo = String(r[cols['الرقم']] ?? '').trim();
@@ -944,6 +1014,7 @@ function normalizeSalesBillsSheet(ws) {
     const afterDisc = cols['ق.بعد الخصم'] !== undefined ? num(r[cols['ق.بعد الخصم']]) : 0;
     const gross = cols['ق.الفاتورة'] !== undefined ? num(r[cols['ق.الفاتورة']]) : 0;
     rows.push({
+      date: cols['التاريخ'] !== undefined ? parseDate(r[cols['التاريخ']]) : '',
       employee: String(r[cols['المستخدم']] ?? '').trim(),
       sales: net || afterDisc || gross,
       invoices: 1,
