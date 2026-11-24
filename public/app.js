@@ -415,27 +415,113 @@ async function renderPreferred(v) {
 // ---------- Customers ----------
 async function renderCustomers(v) {
   const data = await api(`/api/customers?month=${month}`);
-  const sm = data.summary;
-  let q = '';
+  const complaints = await api('/api/complaints');
+  const sm = data.summary, ly = data.loyalty, an = data.analytics || {};
+  let q = '', filter = 'all';
+  const tierBadge = t => t === 'VIP' ? '<span class="badge" style="background:#fef3c7">👑 VIP</span>' : t === 'Gold' ? '<span class="badge" style="background:#fef9c3">🥇 Gold</span>' : '<span class="badge">🥈 Silver</span>';
   const draw = () => {
-    const list = data.customers.filter(c => !q || c.code.includes(q) || (c.name || '').includes(q));
+    const list = data.customers.filter(c => {
+      if (q && !(c.code.includes(q) || (c.name || '').includes(q) || (c.phone || '').includes(q))) return false;
+      if (filter === 'inactive') return c.isInactive;
+      if (filter === 'vip') return c.tier === 'VIP';
+      if (filter === 'new') return c.isNew;
+      return true;
+    });
+    const inactive = data.customers.filter(c => c.isInactive).sort((a, b) => b.sales - a.sales).slice(0, 20);
+    const vips = data.customers.filter(c => c.tier === 'VIP').slice(0, 10);
+    const openC = complaints.filter(c => c.status === 'open');
     v.innerHTML = `<div class="card"><h2>العملاء — ${month}</h2>
     <label>الشهر <input type="month" id="cust-month" value="${month}"></label>
     <div class="grid">
       <div class="stat">عدد العملاء<b>${fmt(sm.totalCustomers)}</b></div>
       <div class="stat">عملاء جدد<b>${fmt(sm.newCustomers)}</b></div>
+      <div class="stat">نشطين<b>${fmt(sm.activeCustomers)}</b></div>
+      <div class="stat">غير نشطين<b>${fmt(sm.inactiveCustomers)}</b></div>
+      <div class="stat">VIP<b>${fmt(sm.vipCustomers)}</b></div>
       <div class="stat">فواتير بكود<b>${fmt(sm.codedInvoices)} / ${fmt(sm.totalInvoices)}</b>${sm.codingRate}%</div>
       <div class="stat">فواتير بدون كود<b>${fmt(sm.uncodedInvoices)}</b>${fmt(sm.uncodedSales)} ج</div>
-      <div class="stat">مبيعات العملاء المكوّدين<b>${fmt(sm.totalSales)} ج</b></div>
+      <div class="stat">كاش باك مستحق<b>${fmt(sm.totalCashback)} ج</b></div>
+      <div class="stat">شكاوى مفتوحة<b>${fmt(sm.openComplaints)}</b></div>
     </div>
-    <label>بحث بالكود أو الاسم <input id="cust-q" value="${q}" placeholder="مثال: 12345"></label>
-    ${list.length ? `<table><tr><th>الكود</th><th>الاسم</th><th>الفواتير</th><th>إجمالي المشتريات</th><th>أول زيارة</th><th>آخر زيارة</th><th>الموظف الأساسي</th><th></th></tr>
-    ${list.slice(0, 200).map(c => `<tr><td>${c.code}</td><td>${c.name || '—'}</td><td>${c.invoices}</td><td>${fmt(c.sales)} ج</td><td>${c.firstDate || '—'}</td><td>${c.lastDate || '—'}</td><td>${c.topEmployee}</td><td>${c.isNew ? '<span class="badge">جديد</span>' : ''}</td></tr>`).join('')}
+    <h3>📊 تحليلات متقدمة — ${month}</h3>
+    <div class="grid">
+      <div class="stat">معدل تكرار الشراء<b>${an.repeatRate}%</b>${fmt(an.repeatCustomers)} عميل رجعوا تاني</div>
+      <div class="stat">عملاء مرة واحدة<b>${fmt(an.oneTimeCustomers)}</b></div>
+      <div class="stat">متوسط فواتير العميل<b>${an.avgInvoicesPerCustomer}</b></div>
+      <div class="stat">متوسط مشتريات العميل<b>${fmt(an.avgSalesPerCustomer)} ج</b></div>
+      <div class="stat">أعلى 10 عملاء<b>${an.top10Share}%</b>من مبيعات العملاء المكوّدين</div>
+      ${an.prev ? `<div class="stat">مقارنة بـ ${an.prev.month}<b>${an.salesChangePct !== null ? (an.salesChangePct >= 0 ? '+' : '') + an.salesChangePct + '%' : '—'}</b>مبيعات (${fmt(an.prev.sales)} ج) — عملاء ${an.customersChangePct !== null ? (an.customersChangePct >= 0 ? '+' : '') + an.customersChangePct + '%' : '—'}</div>` : ''}
+    </div>
+    <h4>شرائح العملاء (RFM)</h4>
+    <div class="grid">
+      <div class="stat">🏆 أبطال<b>${fmt(an.segments.champions)}</b>VIP وبيشتروا كتير</div>
+      <div class="stat">⚠️ معرّضين للفقد<b>${fmt(an.segments.atRisk)}</b>مشتريات عالية ومفيش زيارة من 14 يوم</div>
+      <div class="stat">💚 مخلصين<b>${fmt(an.segments.loyal)}</b>5 فواتير أو أكتر ونشطين</div>
+      <div class="stat">🆕 جدد<b>${fmt(an.segments.newCount)}</b></div>
+      <div class="stat">1️⃣ مرة واحدة<b>${fmt(an.segments.oneTime)}</b></div>
+    </div>
+    <h4>توزيع تكرار الشراء</h4>
+    ${[['فاتورة واحدة', an.freqBuckets.one], ['2-3 فواتير', an.freqBuckets.twoThree], ['4-10 فواتير', an.freqBuckets.fourTen], ['أكتر من 10', an.freqBuckets.overTen]].map(([label, n]) => `<div style="display:flex;align-items:center;gap:8px;margin:4px 0"><span style="width:110px;font-size:13px">${label}</span><div style="flex:1;background:#eee;border-radius:6px;height:18px"><div style="background:#0b5e3a;height:18px;border-radius:6px;width:${sm.totalCustomers ? Math.round(n / sm.totalCustomers * 100) : 0}%"></div></div><b style="width:70px;text-align:left">${fmt(n)}</b></div>`).join('')}
+    <h4>🏆 أعلى 10 عملاء</h4>
+    ${an.top10.length ? `<table><tr><th>#</th><th>الكود</th><th>الاسم</th><th>الفواتير</th><th>المشتريات</th><th>الحصة</th><th>المستوى</th></tr>${an.top10.map((c, i) => `<tr><td>${i + 1}</td><td>${c.code}</td><td>${c.name || '—'}</td><td>${c.invoices}</td><td>${fmt(c.sales)} ج</td><td>${sm.totalSales ? Math.round(c.sales / sm.totalSales * 1000) / 10 : 0}%</td><td>${c.tier}</td></tr>`).join('')}</table>` : ''}
+    ${an.churnedCount ? `<h4>💔 عملاء فقدناهم (كانوا بيشتروا قبل كده ومجوش الشهر ده)</h4><p><b>${fmt(an.churnedCount)} عميل</b> بقيمة مبيعات سابقة <b>${fmt(an.churnedSales)} جنيه</b> — دول أول ناس تتواصل معاهم.</p><table><tr><th>الكود</th><th>مشترياته قبل كده</th><th>فواتيره</th><th>آخر زيارة</th></tr>${an.churned.map(c => `<tr><td>${c.code}</td><td>${fmt(c.sales)} ج</td><td>${c.invoices}</td><td>${c.lastDate || '—'}</td></tr>`).join('')}</table>` : ''}
+    <p><a href="/api/customers.csv?month=${month}">📄 تحميل تقرير العملاء الكامل (CSV)</a></p>
+    <h3>📋 مهام اليوم — المتابعة الذكية</h3>
+    ${inactive.length ? `<p><b>اتصل بالعملاء غير النشطين (مفيش زيارة من 14 يوم):</b></p><ul>${inactive.map(c => `<li>${c.name || 'عميل'} (كود ${c.code})${c.phone ? ' — ' + c.phone : ''} — آخر زيارة ${c.lastDate || '—'} — مشترياته ${fmt(c.sales)} ج</li>`).join('')}</ul>` : '<p class="muted">مفيش عملاء غير نشطين في الشهر ده.</p>'}
+    ${vips.length ? `<p><b>تواصل مع عملاء VIP وقدّم لهم مزايا الولاء:</b></p><ul>${vips.map(c => `<li>${c.name || 'عميل'} (كود ${c.code})${c.phone ? ' — ' + c.phone : ''} — مشترياته ${fmt(c.sales)} ج — كاش باك ${fmt(c.cashback)} ج</li>`).join('')}</ul>` : ''}
+    ${openC.length ? `<p><b>شكاوى مفتوحة لازم تتحل:</b></p><ul>${openC.map(c => `<li>كود ${c.customer_code}: ${c.text} <button class="secondary" data-resolve="${c.id}">تم الحل</button></li>`).join('')}</ul>` : ''}
+    <h3>💳 إعدادات الولاء والكاش باك</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">
+      <label style="flex:1;min-width:120px">نسبة الكاش باك % <input id="ly-rate" type="number" step="0.5" value="${ly.cashback_rate}"></label>
+      <label style="flex:1;min-width:120px">Gold من مشتريات <input id="ly-gold" type="number" value="${ly.gold_min}"></label>
+      <label style="flex:1;min-width:120px">VIP من مشتريات <input id="ly-vip" type="number" value="${ly.vip_min}"></label>
+      <button id="ly-save">حفظ</button>
+    </div>
+    <h3>👤 بيانات عميل (الاسم والتليفون — مش موجودين في الشيت)</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">
+      <label style="flex:1;min-width:100px">الكود <input id="pf-code" placeholder="مثال: 12345"></label>
+      <label style="flex:1;min-width:120px">الاسم <input id="pf-name"></label>
+      <label style="flex:1;min-width:120px">التليفون <input id="pf-phone"></label>
+      <label style="flex:2;min-width:150px">ملاحظات <input id="pf-notes"></label>
+      <button id="pf-save">حفظ بيانات العميل</button>
+    </div>
+    <h3>📝 شكوى جديدة</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">
+      <label style="flex:1;min-width:100px">كود العميل <input id="cp-code"></label>
+      <label style="flex:3;min-width:200px">نص الشكوى <input id="cp-text"></label>
+      <button id="cp-save">تسجيل الشكوى</button>
+    </div>
+    ${complaints.filter(c => c.status === 'resolved').length ? `<h3>الشكاوى المحلولة</h3><ul>${complaints.filter(c => c.status === 'resolved').slice(0, 10).map(c => `<li>كود ${c.customer_code}: ${c.text}</li>`).join('')}</ul>` : ''}
+    <h3>جدول العملاء</h3>
+    <div style="margin:6px 0">${['all', 'inactive', 'vip', 'new'].map(f => `<button class="${filter === f ? '' : 'secondary'}" data-filter="${f}">${f === 'all' ? 'الكل' : f === 'inactive' ? 'غير نشطين' : f === 'vip' ? 'VIP' : 'جدد'}</button> `).join('')}</div>
+    <label>بحث بالكود أو الاسم أو التليفون <input id="cust-q" value="${q}" placeholder="مثال: 12345"></label>
+    ${list.length ? `<table><tr><th>الكود</th><th>الاسم</th><th>التليفون</th><th>المستوى</th><th>الفواتير</th><th>إجمالي المشتريات</th><th>كاش باك</th><th>أول زيارة</th><th>آخر زيارة</th><th>الموظف الأساسي</th><th></th></tr>
+    ${list.slice(0, 200).map(c => `<tr><td>${c.code}</td><td>${c.name || '—'}</td><td>${c.phone || '—'}</td><td>${tierBadge(c.tier)}</td><td>${c.invoices}</td><td>${fmt(c.sales)} ج</td><td>${fmt(c.cashback)} ج</td><td>${c.firstDate || '—'}</td><td>${c.lastDate || '—'}</td><td>${c.topEmployee}</td><td>${c.isNew ? '<span class="badge">جديد</span>' : ''}${c.isInactive ? ' <span class="badge" style="background:#fee4e2">غير نشط</span>' : ''} <button class="secondary" data-edit="${c.code}">تعديل</button></td></tr>`).join('')}
     </table>${list.length > 200 ? `<p class="muted">معروض أول 200 عميل من ${list.length} — ضيّق البحث عشان تشوف الباقي.</p>` : ''}` : '<p>لا يوجد عملاء في الشهر ده — ارفع شيت فواتير الشهر.</p>'}
-    <p class="muted">البيانات من شيت فواتير المبيعات. العميل "جديد" يعني كوده أول مرة يظهر في الشيتات.</p></div>`;
+    <p class="muted">البيانات من شيت فواتير المبيعات. العميل "جديد" يعني كوده أول مرة يظهر في الشيتات، و"غير نشط" يعني مفيش زيارة من 14 يوم لآخر الشهر.</p></div>`;
     $('#cust-month').addEventListener('change', (e) => { month = e.target.value; render(); });
     const qEl = $('#cust-q');
     qEl.addEventListener('input', () => { q = qEl.value; const pos = qEl.selectionStart; draw(); const nq = $('#cust-q'); nq.focus(); nq.setSelectionRange(pos, pos); });
+    v.querySelectorAll('[data-filter]').forEach(b => b.addEventListener('click', () => { filter = b.dataset.filter; draw(); }));
+    v.querySelectorAll('[data-resolve]').forEach(b => b.addEventListener('click', async () => { await api(`/api/complaints/${b.dataset.resolve}/resolve`, { method: 'POST' }); render(); }));
+    v.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
+      const c = data.customers.find(x => x.code === b.dataset.edit);
+      if (!c) return;
+      $('#pf-code').value = c.code; $('#pf-name').value = c.name || ''; $('#pf-phone').value = c.phone || ''; $('#pf-notes').value = c.notes || '';
+      $('#pf-code').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }));
+    $('#ly-save').addEventListener('click', async () => {
+      await api('/api/loyalty/settings', { method: 'POST', body: JSON.stringify({ cashback_rate: $('#ly-rate').value, gold_min: $('#ly-gold').value, vip_min: $('#ly-vip').value }) });
+      render();
+    });
+    $('#pf-save').addEventListener('click', async () => {
+      await api('/api/customers/profile', { method: 'POST', body: JSON.stringify({ code: $('#pf-code').value, name: $('#pf-name').value, phone: $('#pf-phone').value, notes: $('#pf-notes').value }) });
+      render();
+    });
+    $('#cp-save').addEventListener('click', async () => {
+      await api('/api/complaints', { method: 'POST', body: JSON.stringify({ customer_code: $('#cp-code').value, text: $('#cp-text').value }) });
+      render();
+    });
   };
   draw();
 }
