@@ -81,12 +81,11 @@ async function renderDashboard(v) {
     if (lockedEmp) selectedEmployeeId = lockedEmp.id;
     v.innerHTML = `<div class="card">${monthInput}
       ${lockedEmp ? `<p><b>${lockedEmp.name}</b></p>` : `<label>اختر اسمك <select id="emp-pick">${employees.map(e => `<option value="${e.id}" ${e.id === selectedEmployeeId ? 'selected' : ''}>${e.name}</option>`).join('')}</select></label>`}
-      <div id="emp-stats"></div><div id="emp-cashback"></div><div id="emp-coach"></div></div>`;
+      <div id="emp-stats"></div><div id="emp-coach"></div></div>`;
     $('#month-pick').addEventListener('change', (e) => { month = e.target.value; render(); });
     const pickEl = $('#emp-pick');
     if (pickEl) pickEl.addEventListener('change', (e) => { selectedEmployeeId = Number(e.target.value); render(); });
     await renderEmployeeStats($('#emp-stats'), selectedEmployeeId);
-    await renderCashbackSheet($('#emp-cashback'), month);
     const coach = await api(`/api/coach/${selectedEmployeeId}?month=${month}`);
     $('#emp-coach').innerHTML = `<h3>Smart Performance Coach</h3>` + coach.tips.map(t =>
       `<div class="card"><b>${t.indicator}</b> — ${t.cause}<br>المطلوب: ${fmt(t.amount)}<br>اقتراح: ${t.suggestion}<br>الأثر المتوقع: ${t.expected}</div>`).join('');
@@ -130,30 +129,6 @@ async function renderDashboard(v) {
     await api('/api/settings', { method: 'PUT', body: JSON.stringify({ branch_sales: $('#s-sales').value, branch_invoices: $('#s-inv').value, branch_coding: $('#s-cod').value, branch_delivery: $('#s-del').value }) });
     $('#settings-msg').textContent = 'تم الحفظ';
     await loadAll(); render();
-  });
-}
-
-async function renderCashbackSheet(el, month) {
-  const data = await api(`/api/cashback?month=${month}`);
-  const sm = data.summary;
-  el.innerHTML = `<h3>💰 شيت الكاش باك — ${month}</h3>
-    <p>إجمالي الكاش باك المستحق <b>${fmt(sm.totalCashback)} جنيه</b> — اتخصم <b>${fmt(sm.totalRedeemed)}</b> — الباقي <b>${fmt(sm.totalRemaining)}</b> (${fmt(sm.customers)} عميل عندهم كاش باك)</p>
-    <label>ابحث بالكود أو الاسم <input id="cb-search" placeholder="مثال: 6667"></label>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;margin:8px 0">
-      <label>كود العميل <input id="cb-code" placeholder="الكود"></label>
-      <label>المبلغ المخصوم (جنيه) <input id="cb-amount" type="number" placeholder="25"></label>
-      <button id="cb-redeem">خصم كاش باك</button> <span id="cb-msg"></span>
-    </div>
-    <div style="max-height:420px;overflow:auto"><table><tr><th>كود العميل</th><th>اسم العميل</th><th>رقم التليفون</th><th>الكاش باك</th><th>اتخصم</th><th>الباقي</th><th>خصم بواسطة</th></tr><tbody id="cb-rows">${data.rows.map(r => `<tr data-code="${r.code}" data-name="${r.name}"><td>${r.code}</td><td>${r.name || '—'}</td><td>${r.phone || '—'}</td><td><b>${fmt(r.cashback)}</b></td><td>${fmt(r.redeemed)}</td><td><b>${fmt(r.remaining)}</b></td><td>${r.redeemedBy || '—'}</td></tr>`).join('')}</tbody></table></div>`;
-  $('#cb-search').addEventListener('input', (e) => {
-    const q = e.target.value.trim();
-    document.querySelectorAll('#cb-rows tr').forEach(tr => { tr.style.display = (!q || tr.dataset.code.includes(q) || (tr.dataset.name || '').includes(q)) ? '' : 'none'; });
-  });
-  $('#cb-redeem').addEventListener('click', async () => {
-    const r = await api('/api/cashback/redeem', { method: 'POST', body: JSON.stringify({ code: $('#cb-code').value, amount: $('#cb-amount').value, month }) });
-    if (r.error) { $('#cb-msg').textContent = r.error; return; }
-    $('#cb-msg').textContent = `تم الخصم بواسطة ${r.redeemedBy} — الباقي للعميل: ${fmt(r.remaining)} جنيه`;
-    await renderCashbackSheet(el, month);
   });
 }
 
@@ -465,7 +440,6 @@ async function renderCustomers(v) {
       <div class="stat">VIP<b>${fmt(sm.vipCustomers)}</b></div>
       <div class="stat">فواتير بكود<b>${fmt(sm.codedInvoices)} / ${fmt(sm.totalInvoices)}</b>${sm.codingRate}%</div>
       <div class="stat">فواتير بدون كود<b>${fmt(sm.uncodedInvoices)}</b>${fmt(sm.uncodedSales)} ج</div>
-      <div class="stat">كاش باك مستحق<b>${fmt(sm.totalCashback)} ج</b></div>
       <div class="stat">شكاوى مفتوحة<b>${fmt(sm.openComplaints)}</b></div>
     </div>
     <h3>📊 تحليلات متقدمة — ${month}</h3>
@@ -496,27 +470,21 @@ async function renderCustomers(v) {
     ${an.chronic.length ? `<p class="muted">دول أكتر عملاء بييجوا بانتظام (4 فواتير أو أكتر في الشهر). "اتصل به يوم" = آخر زيارة + متوسط الفاصل بين زياراته — اتصل قبلها بيومين عشان تذكّره بتجديد الدواء.</p><table><tr><th>الكود</th><th>الاسم</th><th>التليفون</th><th>زيارات</th><th>مشتريات</th><th>بييجي كل</th><th>اتصل به يوم</th></tr>${an.chronic.map(c => `<tr><td>${c.code}</td><td>${c.name || '—'}</td><td>${c.phone || '—'}</td><td>${c.invoices}</td><td>${fmt(c.sales)} ج</td><td>${c.avgGap} يوم</td><td><b>${c.nextCall}</b></td></tr>`).join('')}</table>` : '<p>لا يوجد عملاء مزمنون في الشهر ده.</p>'}
     <h4>📉 عملاء تواصلهم قل — نوصي بالاتصال بيهم</h4>
     ${an.declining.length ? `<p class="muted">${an.decliningBasis === 'prev' ? 'مقارنة بعدد فواتير الشهر اللي فات.' : 'لسه مفيش شيت للشهر اللي فات — المقارنة هنا بين النصف الأول والنصف التاني من نفس الشهر.'}</p><table><tr><th>الكود</th><th>الاسم</th><th>التليفون</th><th>${an.decliningBasis === 'prev' ? 'الشهر اللي فات' : 'النصف الأول'}</th><th>${an.decliningBasis === 'prev' ? 'الشهر ده' : 'النصف التاني'}</th><th>نسبة الانخفاض</th><th>آخر زيارة</th></tr>${an.declining.map(c => `<tr><td>${c.code}</td><td>${c.name || '—'}</td><td>${c.phone || '—'}</td><td>${c.prevInvoices} فاتورة</td><td>${c.invoices} فاتورة</td><td><b>${c.dropPct}%</b></td><td>${c.lastDate || '—'}</td></tr>`).join('')}</table><p class="muted">التوصية: اتصل بيهم واسأل عن سبب الغياب — ممكن يكون راح صيدلية تانية أو الدواء مش متوفر.</p>` : '<p>مفيش عملاء قلّ تواصلهم في الشهر ده.</p>'}
-    <div id="cust-cashback"></div>
     <h3>📋 مهام اليوم — المتابعة الذكية</h3>
     ${inactive.length ? `<p><b>اتصل بالعملاء غير النشطين (مفيش زيارة من 14 يوم):</b></p><ul>${inactive.map(c => `<li>${c.name || 'عميل'} (كود ${c.code})${c.phone ? ' — ' + c.phone : ''} — آخر زيارة ${c.lastDate || '—'} — مشترياته ${fmt(c.sales)} ج</li>`).join('')}</ul>` : '<p class="muted">مفيش عملاء غير نشطين في الشهر ده.</p>'}
-    ${vips.length ? `<p><b>تواصل مع عملاء VIP وقدّم لهم مزايا الولاء:</b></p><ul>${vips.map(c => `<li>${c.name || 'عميل'} (كود ${c.code})${c.phone ? ' — ' + c.phone : ''} — مشترياته ${fmt(c.sales)} ج — كاش باك ${fmt(c.cashback)} ج</li>`).join('')}</ul>` : ''}
+    ${vips.length ? `<p><b>تواصل مع عملاء VIP وقدّم لهم مزايا الولاء:</b></p><ul>${vips.map(c => `<li>${c.name || 'عميل'} (كود ${c.code})${c.phone ? ' — ' + c.phone : ''} — مشترياته ${fmt(c.sales)} ج</li>`).join('')}</ul>` : ''}
     ${openC.length ? `<p><b>شكاوى مفتوحة لازم تتحل:</b></p><ul>${openC.map(c => `<li>كود ${c.customer_code}: ${c.text} <button class="secondary" data-resolve="${c.id}">تم الحل</button></li>`).join('')}</ul>` : ''}
-    <h3>💳 إعدادات الولاء والكاش باك</h3>
-    <p class="muted">القاعدة: كل ${fmt(ly.cashback_step || 500)} جنيه كاملة (بعد استبعاد الألبان والحفاضات) عليها ${fmt(ly.cashback_per_500 ?? 25)} جنيه كاش باك — اللي اشترى بـ 800 ياخد ${fmt(ly.cashback_per_500 ?? 25)} بس، والضعف من ${fmt((ly.cashback_step || 500) * 2)}.</p>
+    <h3>💳 إعدادات مستويات الولاء</h3>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">
-      <label style="flex:1;min-width:120px">قيمة الخطوة (جنيه) <input id="ly-step" type="number" value="${ly.cashback_step || 500}"></label>
-      <label style="flex:1;min-width:120px">كاش باك لكل خطوة (جنيه) <input id="ly-per" type="number" value="${ly.cashback_per_500 ?? 25}"></label>
       <label style="flex:1;min-width:120px">Gold من مشتريات <input id="ly-gold" type="number" value="${ly.gold_min}"></label>
       <label style="flex:1;min-width:120px">VIP من مشتريات <input id="ly-vip" type="number" value="${ly.vip_min}"></label>
       <button id="ly-save">حفظ</button>
     </div>
-    <p class="muted">إجمالي الألبان والحفاضات في شيت أصناف الشهر ده: <b>${fmt(sm.excludedBranch || 0)} جنيه</b> (مستبعدة من الكاش باك على مستوى الفرع — الاستبعاد الدقيق لكل عميل بيتسجل في بياناته تحت).</p>
     <h3>👤 بيانات عميل (الاسم والتليفون — مش موجودين في الشيت)</h3>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">
       <label style="flex:1;min-width:100px">الكود <input id="pf-code" placeholder="مثال: 12345"></label>
       <label style="flex:1;min-width:120px">الاسم <input id="pf-name"></label>
       <label style="flex:1;min-width:120px">التليفون <input id="pf-phone"></label>
-      <label style="flex:1;min-width:130px">مستبعد: ألبان وحفاضات (جنيه) <input id="pf-excluded" type="number" value="0"></label>
       <label style="flex:2;min-width:150px">ملاحظات <input id="pf-notes"></label>
       <button id="pf-save">حفظ بيانات العميل</button>
     </div>
@@ -530,8 +498,8 @@ async function renderCustomers(v) {
     <h3>جدول العملاء</h3>
     <div style="margin:6px 0">${['all', 'inactive', 'vip', 'new'].map(f => `<button class="${filter === f ? '' : 'secondary'}" data-filter="${f}">${f === 'all' ? 'الكل' : f === 'inactive' ? 'غير نشطين' : f === 'vip' ? 'VIP' : 'جدد'}</button> `).join('')}</div>
     <label>بحث بالكود أو الاسم أو التليفون <input id="cust-q" value="${q}" placeholder="مثال: 12345"></label>
-    ${list.length ? `<table><tr><th>الكود</th><th>الاسم</th><th>التليفون</th><th>المستوى</th><th>الفواتير</th><th>إجمالي المشتريات</th><th>كاش باك</th><th>أول زيارة</th><th>آخر زيارة</th><th>الموظف الأساسي</th><th></th></tr>
-    ${list.slice(0, 200).map(c => `<tr><td>${c.code}</td><td>${c.name || '—'}</td><td>${c.phone || '—'}</td><td>${tierBadge(c.tier)}</td><td>${c.invoices}</td><td>${fmt(c.sales)} ج</td><td>${fmt(c.cashback)} ج</td><td>${c.firstDate || '—'}</td><td>${c.lastDate || '—'}</td><td>${c.topEmployee}</td><td>${c.isNew ? '<span class="badge">جديد</span>' : ''}${c.isInactive ? ' <span class="badge" style="background:#fee4e2">غير نشط</span>' : ''} <button class="secondary" data-edit="${c.code}">تعديل</button></td></tr>`).join('')}
+    ${list.length ? `<table><tr><th>الكود</th><th>الاسم</th><th>التليفون</th><th>المستوى</th><th>الفواتير</th><th>إجمالي المشتريات</th><th>أول زيارة</th><th>آخر زيارة</th><th>الموظف الأساسي</th><th></th></tr>
+    ${list.slice(0, 200).map(c => `<tr><td>${c.code}</td><td>${c.name || '—'}</td><td>${c.phone || '—'}</td><td>${tierBadge(c.tier)}</td><td>${c.invoices}</td><td>${fmt(c.sales)} ج</td><td>${c.firstDate || '—'}</td><td>${c.lastDate || '—'}</td><td>${c.topEmployee}</td><td>${c.isNew ? '<span class="badge">جديد</span>' : ''}${c.isInactive ? ' <span class="badge" style="background:#fee4e2">غير نشط</span>' : ''} <button class="secondary" data-edit="${c.code}">تعديل</button></td></tr>`).join('')}
     </table>${list.length > 200 ? `<p class="muted">معروض أول 200 عميل من ${list.length} — ضيّق البحث عشان تشوف الباقي.</p>` : ''}` : '<p>لا يوجد عملاء في الشهر ده — ارفع شيت فواتير الشهر.</p>'}
     <p class="muted">البيانات من شيت فواتير المبيعات. العميل "جديد" يعني كوده أول مرة يظهر في الشيتات، و"غير نشط" يعني مفيش زيارة من 14 يوم لآخر الشهر.</p></div>`;
     $('#cust-month').addEventListener('change', (e) => { month = e.target.value; render(); });
@@ -542,22 +510,21 @@ async function renderCustomers(v) {
     v.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
       const c = data.customers.find(x => x.code === b.dataset.edit);
       if (!c) return;
-      $('#pf-code').value = c.code; $('#pf-name').value = c.name || ''; $('#pf-phone').value = c.phone || ''; $('#pf-notes').value = c.notes || ''; $('#pf-excluded').value = c.excluded || 0;
+      $('#pf-code').value = c.code; $('#pf-name').value = c.name || ''; $('#pf-phone').value = c.phone || ''; $('#pf-notes').value = c.notes || '';
       $('#pf-code').scrollIntoView({ behavior: 'smooth', block: 'center' });
     }));
     $('#ly-save').addEventListener('click', async () => {
-      await api('/api/loyalty/settings', { method: 'POST', body: JSON.stringify({ cashback_step: $('#ly-step').value, cashback_per_500: $('#ly-per').value, gold_min: $('#ly-gold').value, vip_min: $('#ly-vip').value }) });
+      await api('/api/loyalty/settings', { method: 'POST', body: JSON.stringify({ gold_min: $('#ly-gold').value, vip_min: $('#ly-vip').value }) });
       render();
     });
     $('#pf-save').addEventListener('click', async () => {
-      await api('/api/customers/profile', { method: 'POST', body: JSON.stringify({ code: $('#pf-code').value, name: $('#pf-name').value, phone: $('#pf-phone').value, notes: $('#pf-notes').value, excluded: $('#pf-excluded').value }) });
+      await api('/api/customers/profile', { method: 'POST', body: JSON.stringify({ code: $('#pf-code').value, name: $('#pf-name').value, phone: $('#pf-phone').value, notes: $('#pf-notes').value }) });
       render();
     });
     $('#cp-save').addEventListener('click', async () => {
       await api('/api/complaints', { method: 'POST', body: JSON.stringify({ customer_code: $('#cp-code').value, text: $('#cp-text').value }) });
       render();
     });
-    renderCashbackSheet($('#cust-cashback'), month);
   };
   draw();
 }
