@@ -106,7 +106,7 @@ async function renderDashboard(v) {
     ${rep.sheets && rep.sheets.sales > 0 ? `<p class="ok">من الشيتات المرفوعة في الشهر ده: ${fmt(rep.sheets.sales)} جنيه مبيعات${rep.sheets.invoices ? ` — ${fmt(rep.sheets.invoices)} فاتورة` : ''}${rep.sheets.coding ? ` — تكويد ${fmt(rep.sheets.coding)}` : ''}${rep.sheets.itemsCount ? ` — ${fmt(rep.sheets.itemsCount)} صنف بإجمالي ${fmt(rep.sheets.totalQty)} قطعة` : ''} (${[...new Set(rep.sheets.files)].join('، ')})</p>` : ''}
     <h3>الفريق</h3>
     <table><tr><th>الموظف</th><th>المبيعات</th><th>الفواتير</th><th>التكويد</th><th>المؤشر</th><th>التصنيف</th></tr>
-    ${rep.perEmployee.map(e => `<tr><td>${e.name}</td><td>${fmt(e.achieved.sales)} / ${fmt(e.target.sales)}</td><td>${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)}</td><td>${fmt(e.achieved.coding)} / ${fmt(e.target.coding)}<br><span style="font-size:12px;color:#555">بكود: ${fmt(e.achieved.coded || 0)} فاتورة (${e.achieved.codingRate || 0}%)</span></td><td>${e.index}%</td><td><span class="badge">${e.classification}</span></td></tr>`).join('')}
+    ${rep.perEmployee.map(e => `<tr><td>${e.name}</td><td>${fmt(e.achieved.sales)} / ${fmt(e.target.sales)}</td><td>${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)}</td><td>${e.achieved.codingRate || 0}%</td><td>${e.index}%</td><td><span class="badge">${e.classification}</span></td></tr>`).join('')}
     </table>
     <h3>🏆 لوحة الصدارة — ${month}</h3>
     ${rep.leaderboard && rep.leaderboard.some(r => r.achieved.sales > 0 || r.achieved.invoices > 0) ? `
