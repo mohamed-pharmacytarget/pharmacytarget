@@ -316,6 +316,15 @@ const requireRole = (...roles) => (req, res, next) => {
   next();
 };
 const me = (req) => req.session.user;
+// Employee row linked to this login (per-employee accounts, e.g. amr/1234).
+// The shared 'employee' account has no linked row -> null (it uses the picker).
+function ownEmployeeId(req) {
+  if (!req.session.user || req.session.user.role !== 'employee') return null;
+  try {
+    const row = db.prepare('SELECT id FROM employees WHERE user_id=? AND active=1').get(req.session.user.id);
+    return row ? row.id : null;
+  } catch (e) { return null; }
+}
 
 // ---------- Helpers ----------
 function monthRange(month) { // month = YYYY-MM
@@ -397,7 +406,14 @@ app.put('/api/settings', requireRole('owner', 'manager', 'superadmin'), (req, re
 
 // ---------- Employees ----------
 app.get('/api/employees', requireAuth, (req, res) => {
+  const own = ownEmployeeId(req);
   const rows = db.prepare('SELECT * FROM employees WHERE active=1 ORDER BY name').all();
+  if (req.session.user.role === 'employee' && own) {
+    return res.json(rows.filter(r => r.id === own).map(r => ({ ...r, custom_items: JSON.parse(r.custom_items || '[]') })));
+  }
+  if (req.session.user.role === 'employee') {
+    return res.json(rows.map(r => ({ id: r.id, name: r.name }))); // shared account: names only, no targets
+  }
   res.json(rows.map(r => ({ ...r, custom_items: JSON.parse(r.custom_items || '[]') })));
 });
 app.post('/api/employees', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
@@ -483,7 +499,9 @@ app.delete('/api/employees/:id', requireRole('owner', 'manager', 'superadmin'), 
 
 // ---------- Daily results ----------
 app.get('/api/daily', requireAuth, (req, res) => {
-  const { employee_id, month } = req.query;
+  const own = ownEmployeeId(req);
+  const employee_id = own || req.query.employee_id;
+  const { month } = req.query;
   if (!employee_id || !month) return res.status(400).json({ error: 'employee_id و month مطلوبان' });
   const { start, end } = monthRange(month);
   const rows = db.prepare('SELECT * FROM daily_results WHERE employee_id=? AND date>=? AND date<=? ORDER BY date')
@@ -491,7 +509,9 @@ app.get('/api/daily', requireAuth, (req, res) => {
   res.json(rows);
 });
 app.post('/api/daily', requireAuth, (req, res) => {
-  const { employee_id, date, sales, invoices, coding, delivery, preferred_value } = req.body || {};
+  const own = ownEmployeeId(req);
+  const { date, sales, invoices, coding, delivery, preferred_value } = req.body || {};
+  const employee_id = own || req.body.employee_id;
   if (!employee_id || !date) return res.status(400).json({ error: 'الموظف والتاريخ مطلوبان' });
   db.prepare(`INSERT INTO daily_results (employee_id, date, sales, invoices, coding, delivery, preferred_value, created_by)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -639,11 +659,22 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
     };
   }).sort((a, b) => isPastMonth ? b.achieved.sales - a.achieved.sales : b.salesPct - a.salesPct)
     .map((r, i) => ({ ...r, rank: i + 1, rankBy: isPastMonth ? 'sales' : 'pct' }));
+  const own = ownEmployeeId(req);
+  if (req.session.user.role === 'employee' && own) {
+    const mine = perEmployee.find(e => e.id === own);
+    return res.json({ month, settings, workingDays: wd,
+      totals: mine ? mine.achieved : { sales: 0, invoices: 0, coding: 0, delivery: 0, preferred: 0 },
+      avgInvoice: 0, perEmployee: mine ? [mine] : [],
+      problems: mine ? problems.filter(x => x.employee === mine.name) : [],
+      sheets: {}, leaderboard: [] });
+  }
   res.json({ month, settings, workingDays: wd, totals, avgInvoice, perEmployee, problems, sheets, leaderboard });
 });
 
 // Smart Performance Coach
 app.get('/api/coach/:employee_id', requireAuth, (req, res) => {
+  const own = ownEmployeeId(req);
+  if (own && Number(req.params.employee_id) !== own) return res.status(403).json({ error: 'غير مسموح' });
   const month = req.query.month || new Date().toISOString().slice(0, 7);
   const e = db.prepare('SELECT * FROM employees WHERE id=?').get(req.params.employee_id);
   if (!e) return res.status(404).json({ error: 'موظف غير موجود' });
@@ -667,7 +698,9 @@ app.get('/api/coach/:employee_id', requireAuth, (req, res) => {
 // CSV export
 app.get('/api/export.csv', requireAuth, (req, res) => {
   const month = req.query.month || new Date().toISOString().slice(0, 7);
-  const emps = db.prepare('SELECT * FROM employees WHERE active=1').all();
+  const ownCsv = ownEmployeeId(req);
+  const emps = ownCsv ? db.prepare('SELECT * FROM employees WHERE id=? AND active=1').all(ownCsv)
+    : db.prepare('SELECT * FROM employees WHERE active=1').all();
   let csv = 'الموظف,مبيعات محققة,تارجت مبيعات,فواتير محققة,تارجت فواتير,تكويد محقق,تارجت تكويد,قيمة Preferred\n';
   for (const e of emps) {
     const t = employeeTotals(e.id, month);
@@ -774,7 +807,9 @@ app.delete('/api/preferred/:id', requireRole('owner', 'manager', 'superadmin'), 
 app.get('/api/preferred/achievement', requireAuth, (req, res) => {
   const month = req.query.month || new Date().toISOString().slice(0, 7);
   const { start, end } = monthRange(month);
-  const emps = db.prepare('SELECT * FROM employees WHERE active=1').all();
+  const ownPref = ownEmployeeId(req);
+  const emps = ownPref ? db.prepare('SELECT * FROM employees WHERE id=? AND active=1').all(ownPref)
+    : db.prepare('SELECT * FROM employees WHERE active=1').all();
   const prefNames = db.prepare('SELECT name FROM preferred_items WHERE active=1').all().map(r => r.name.trim());
   const out = emps.map(e => {
     const t = employeeTotals(e.id, month);
