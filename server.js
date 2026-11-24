@@ -624,6 +624,7 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
     const prev = prevSheets.byEmployee[e.name.trim()] || { sales: 0 };
     const prevPct = pct(prev.sales || 0, e.target.sales);
     const elapsed = Math.max(1, Math.min(dayNum, daysInMonth));
+    const share = totals.sales > 0 ? Math.round((e.achieved.sales / totals.sales) * 100) : 0;
     return {
       id: e.id, name: e.name,
       salesPct, invPct: pct(e.achieved.invoices, e.target.invoices),
@@ -632,7 +633,8 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
       projection: Math.round((e.achieved.sales / elapsed) * daysInMonth),
       atv: e.achieved.invoices > 0 ? Math.round(e.achieved.sales / e.achieved.invoices) : 0,
       upt: e.achieved.invoices > 0 ? +((e.achieved.qty || 0) / e.achieved.invoices).toFixed(1) : 0,
-      share: totals.sales > 0 ? Math.round((e.achieved.sales / totals.sales) * 100) : 0,
+      share,
+      impact: share >= 15 ? 'مؤثر جدًا' : share >= 10 ? 'مؤثر' : share >= 5 ? 'متوسط' : 'تأثير محدود',
       improved: (prev.sales || 0) > 0 ? salesPct - prevPct : null,
     };
   }).sort((a, b) => isPastMonth ? b.achieved.sales - a.achieved.sales : b.salesPct - a.salesPct)
