@@ -611,6 +611,16 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const dayNum = month === today.slice(0, 7) ? Number(today.slice(8, 10)) : monthRange(month).daysInMonth;
   const sheets = sheetTotalsForMonth(month);
+  // Branch coded-invoice rate (from bills sheets) and whether ANY new-code
+  // data was recorded this month (daily entries). When nobody recorded new
+  // codes, the coding part of the index uses the coded-invoice rate instead
+  // of 0/new-target — otherwise every employee's index is dragged to ~60%
+  // and everyone gets the same "يحتاج دعمًا" label.
+  const branchCoded = Object.values(sheets.byEmployee).reduce((a, v) => a + (v.coded || 0), 0);
+  const branchInv = Object.values(sheets.byEmployee).reduce((a, v) => a + (v.invoices || 0), 0);
+  const sheetBranchRate = branchInv ? Math.round(branchCoded / branchInv * 1000) / 10 : 0;
+  const sheetBranchRateTarget = sheetBranchRate ? Math.min(100, Math.round(sheetBranchRate * 1.1 * 10) / 10) : 0;
+  const anyCodingData = db.prepare("SELECT COUNT(*) c FROM daily_results WHERE substr(date,1,7)=? AND coding>0").get(month).c > 0;
   const perEmployee = emps.map(e => {
     const t = employeeTotals(e.id, month);
     const offDates = offDaysFor(e.id, month);
@@ -625,13 +635,16 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
     const idxParts = [];
     if (e.monthly_sales > 0) idxParts.push(pct(t.sales, e.monthly_sales));
     if (e.monthly_invoices > 0) idxParts.push(pct(t.invoices, e.monthly_invoices));
-    if (e.monthly_coding > 0) idxParts.push(pct(t.coding, e.monthly_coding));
+    if (e.monthly_coding > 0) {
+      if (anyCodingData) idxParts.push(pct(t.coding, e.monthly_coding));
+      else if (sheetBranchRateTarget > 0) idxParts.push(Math.min(100, Math.round(t.codingRate / sheetBranchRateTarget * 100)));
+    }
     const idx = idxParts.length ? Math.round(idxParts.reduce((a, b) => a + b, 0) / idxParts.length) : 0;
     return {
       id: e.id, name: e.name, username: e.username,
       target: { sales: e.monthly_sales, invoices: e.monthly_invoices, coding: e.monthly_coding },
       achieved: t, index: idx,
-      classification: idx >= 90 ? 'ممتاز' : idx >= 70 ? 'على المسار الصحيح' : idx >= 50 ? 'يحتاج دعمًا' : 'متأخر',
+      classification: idx >= 90 ? 'ممتاز' : idx >= 80 ? 'جيد جدًا' : idx >= 70 ? 'على المسار الصحيح' : idx >= 50 ? 'يحتاج دعمًا' : 'متأخر',
       dailyRequired: { sales: Math.round(dailySales), invoices: Math.round(e.monthly_invoices / wdEmp), coding: Math.round(e.monthly_coding / wdEmp) },
       tomorrow: { sales: tomorrowSales },
       custom_items: JSON.parse(e.custom_items || '[]'),
