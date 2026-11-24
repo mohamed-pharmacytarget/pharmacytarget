@@ -471,17 +471,21 @@ async function renderCustomers(v) {
     ${vips.length ? `<p><b>تواصل مع عملاء VIP وقدّم لهم مزايا الولاء:</b></p><ul>${vips.map(c => `<li>${c.name || 'عميل'} (كود ${c.code})${c.phone ? ' — ' + c.phone : ''} — مشترياته ${fmt(c.sales)} ج — كاش باك ${fmt(c.cashback)} ج</li>`).join('')}</ul>` : ''}
     ${openC.length ? `<p><b>شكاوى مفتوحة لازم تتحل:</b></p><ul>${openC.map(c => `<li>كود ${c.customer_code}: ${c.text} <button class="secondary" data-resolve="${c.id}">تم الحل</button></li>`).join('')}</ul>` : ''}
     <h3>💳 إعدادات الولاء والكاش باك</h3>
+    <p class="muted">القاعدة: كل ${fmt(ly.cashback_step || 500)} جنيه كاملة (بعد استبعاد الألبان والحفاضات) عليها ${fmt(ly.cashback_per_500 ?? 25)} جنيه كاش باك — اللي اشترى بـ 800 ياخد ${fmt(ly.cashback_per_500 ?? 25)} بس، والضعف من ${fmt((ly.cashback_step || 500) * 2)}.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">
-      <label style="flex:1;min-width:120px">نسبة الكاش باك % <input id="ly-rate" type="number" step="0.5" value="${ly.cashback_rate}"></label>
+      <label style="flex:1;min-width:120px">قيمة الخطوة (جنيه) <input id="ly-step" type="number" value="${ly.cashback_step || 500}"></label>
+      <label style="flex:1;min-width:120px">كاش باك لكل خطوة (جنيه) <input id="ly-per" type="number" value="${ly.cashback_per_500 ?? 25}"></label>
       <label style="flex:1;min-width:120px">Gold من مشتريات <input id="ly-gold" type="number" value="${ly.gold_min}"></label>
       <label style="flex:1;min-width:120px">VIP من مشتريات <input id="ly-vip" type="number" value="${ly.vip_min}"></label>
       <button id="ly-save">حفظ</button>
     </div>
+    <p class="muted">إجمالي الألبان والحفاضات في شيت أصناف الشهر ده: <b>${fmt(sm.excludedBranch || 0)} جنيه</b> (مستبعدة من الكاش باك على مستوى الفرع — الاستبعاد الدقيق لكل عميل بيتسجل في بياناته تحت).</p>
     <h3>👤 بيانات عميل (الاسم والتليفون — مش موجودين في الشيت)</h3>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">
       <label style="flex:1;min-width:100px">الكود <input id="pf-code" placeholder="مثال: 12345"></label>
       <label style="flex:1;min-width:120px">الاسم <input id="pf-name"></label>
       <label style="flex:1;min-width:120px">التليفون <input id="pf-phone"></label>
+      <label style="flex:1;min-width:130px">مستبعد: ألبان وحفاضات (جنيه) <input id="pf-excluded" type="number" value="0"></label>
       <label style="flex:2;min-width:150px">ملاحظات <input id="pf-notes"></label>
       <button id="pf-save">حفظ بيانات العميل</button>
     </div>
@@ -507,15 +511,15 @@ async function renderCustomers(v) {
     v.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
       const c = data.customers.find(x => x.code === b.dataset.edit);
       if (!c) return;
-      $('#pf-code').value = c.code; $('#pf-name').value = c.name || ''; $('#pf-phone').value = c.phone || ''; $('#pf-notes').value = c.notes || '';
+      $('#pf-code').value = c.code; $('#pf-name').value = c.name || ''; $('#pf-phone').value = c.phone || ''; $('#pf-notes').value = c.notes || ''; $('#pf-excluded').value = c.excluded || 0;
       $('#pf-code').scrollIntoView({ behavior: 'smooth', block: 'center' });
     }));
     $('#ly-save').addEventListener('click', async () => {
-      await api('/api/loyalty/settings', { method: 'POST', body: JSON.stringify({ cashback_rate: $('#ly-rate').value, gold_min: $('#ly-gold').value, vip_min: $('#ly-vip').value }) });
+      await api('/api/loyalty/settings', { method: 'POST', body: JSON.stringify({ cashback_step: $('#ly-step').value, cashback_per_500: $('#ly-per').value, gold_min: $('#ly-gold').value, vip_min: $('#ly-vip').value }) });
       render();
     });
     $('#pf-save').addEventListener('click', async () => {
-      await api('/api/customers/profile', { method: 'POST', body: JSON.stringify({ code: $('#pf-code').value, name: $('#pf-name').value, phone: $('#pf-phone').value, notes: $('#pf-notes').value }) });
+      await api('/api/customers/profile', { method: 'POST', body: JSON.stringify({ code: $('#pf-code').value, name: $('#pf-name').value, phone: $('#pf-phone').value, notes: $('#pf-notes').value, excluded: $('#pf-excluded').value }) });
       render();
     });
     $('#cp-save').addEventListener('click', async () => {
