@@ -687,7 +687,7 @@ app.get('/api/preferred/achievement', requireAuth, (req, res) => {
 // ---------- Sheet uploads (Excel / CSV) ----------
 app.post('/api/uploads', requireRole('owner', 'manager', 'superadmin'), upload.single('file'), (req, res) => {
   const type = req.body.type || 'sales'; // sales | items
-  const sheetMonth = /^\d{4}-\d{2}$/.test(req.body.month || '') ? req.body.month : new Date().toISOString().slice(0, 7);
+  let sheetMonth = /^\d{4}-\d{2}$/.test(req.body.month || '') ? req.body.month : new Date().toISOString().slice(0, 7);
   const employee_id = req.body.employee_id ? Number(req.body.employee_id) : null;
   if (!req.file) return res.status(400).json({ error: 'اختر ملف أكسيل أو CSV' });
   let rows = [];
@@ -696,6 +696,15 @@ app.post('/api/uploads', requireRole('owner', 'manager', 'superadmin'), upload.s
     const ws = wb.Sheets[wb.SheetNames[0]];
     if (type === 'items') {
       rows = normalizeItemsSheet(ws) || XLSX.utils.sheet_to_json(ws, { defval: '' });
+    } else if (type === 'sales') {
+      const bills = normalizeSalesBillsSheet(ws);
+      if (bills) {
+        rows = bills;
+        const inferred = inferMonthFromSalesBills(ws);
+        if (inferred) sheetMonth = inferred; // the sheet itself knows its month
+      } else {
+        rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      }
     } else {
       rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
     }
@@ -707,6 +716,57 @@ app.post('/api/uploads', requireRole('owner', 'manager', 'superadmin'), upload.s
   audit(me(req).username, 'upload', `رفع شيت ${req.file.originalname} (${type})`);
   res.json({ ok: true, id: r.lastInsertRowid, rows: rows.length, analysis: analyzeRows(type, rows) });
 });
+// Month from a Sales Bills title like "فواتير المبيعات من 01/10/2026 إلى 30/10/2026"
+// (uses the end date). Returns 'YYYY-MM' or null.
+function inferMonthFromSalesBills(ws) {
+  const arr = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  for (let i = 0; i < Math.min(arr.length, 5); i++) {
+    for (const cell of arr[i]) {
+      const text = String(cell ?? '');
+      const dates = text.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/g) || [];
+      if (dates.length) {
+        const last = dates[dates.length - 1].split('/');
+        const mm = last[1].padStart(2, '0');
+        if (+mm >= 1 && +mm <= 12) return `${last[2]}-${mm}`;
+      }
+    }
+  }
+  return null;
+}
+// e-Plus "فواتير المبيعات" export: title row, then a header row
+// (الرقم، النوع، الكود، العميل، التاريخ، ع.أصناف، ...، ق.الفاتورة، ق.بعد الخصم، ق.الصافى، ...، المستخدم)
+// Normalizes each bill to { employee, sales, invoices: 1, qty } so the sales analysis can use it.
+function normalizeSalesBillsSheet(ws) {
+  const arr = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  if (!arr.length) return null;
+  let hi = -1; let cols = {};
+  for (let i = 0; i < arr.length; i++) {
+    const heads = arr[i].map(h => String(h).trim());
+    if (heads.includes('الرقم') && (heads.includes('ق.الصافى') || heads.includes('ق.الفاتورة'))) {
+      hi = i;
+      heads.forEach((h, j) => { cols[h] = j; });
+      break;
+    }
+  }
+  if (hi < 0) return null;
+  const num = v => { const n = Number(String(v ?? '').replace(/[^0-9.\-]/g, '')); return isNaN(n) ? 0 : n; };
+  const rows = [];
+  for (const r of arr.slice(hi + 1)) {
+    const billNo = String(r[cols['الرقم']] ?? '').trim();
+    if (!billNo || !/^\d+$/.test(billNo)) continue; // skip footer / empty rows
+    const net = cols['ق.الصافى'] !== undefined ? num(r[cols['ق.الصافى']]) : 0;
+    const afterDisc = cols['ق.بعد الخصم'] !== undefined ? num(r[cols['ق.بعد الخصم']]) : 0;
+    const gross = cols['ق.الفاتورة'] !== undefined ? num(r[cols['ق.الفاتورة']]) : 0;
+    rows.push({
+      employee: String(r[cols['المستخدم']] ?? '').trim(),
+      sales: net || afterDisc || gross,
+      invoices: 1,
+      coding: 0,
+      qty: cols['ع.أصناف'] !== undefined ? num(r[cols['ع.أصناف']]) : 0,
+    });
+  }
+  return rows;
+}
 function analyzeRows(type, rows) {
   const s = getSettings();
   if (type === 'items') {
