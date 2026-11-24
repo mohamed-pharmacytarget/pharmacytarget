@@ -195,7 +195,9 @@ async function syncFromBlob({ force = false } = {}) {
     const blob = blobs && blobs[0];
     if (!blob) return false;
     const uploadedAt = new Date(blob.uploadedAt).getTime();
-    if (uploadedAt <= lastBlobUploadedAt) return false;
+    // Mutations must start from the newest snapshot: the Blob list can lag,
+    // and trusting its timestamp has already lost writes. Always download.
+    if (!force && uploadedAt <= lastBlobUploadedAt) return false;
     let res = await fetch(blob.url, { headers: { Authorization: `Bearer ${BLOB_TOKEN}` } });
     if (!res.ok) res = await fetch(blob.url); // public-store fallback
     if (!res.ok) throw new Error(`blob download failed: ${res.status}`);
@@ -503,16 +505,10 @@ app.post('/api/daily', requireAuth, (req, res) => {
 });
 
 // ---------- Reports ----------
-app.get('/api/reports/summary', requireAuth, (req, res) => {
-  const month = req.query.month || new Date().toISOString().slice(0, 7);
-  const settings = getSettings();
-  const emps = db.prepare('SELECT * FROM employees WHERE active=1').all();
-  const wd = workingDays(month);
-  const today = new Date().toISOString().slice(0, 10);
-  const dayNum = month === today.slice(0, 7) ? Number(today.slice(8, 10)) : monthRange(month).daysInMonth;
-  // Sheet totals for this month: latest upload per (type, filename) so re-uploading
-  // the same file does not double-count. Items sheets feed branch totals only
-  // (they carry no employee names); sales sheets also feed per-employee totals.
+// Sheet totals for one month: latest upload per (type, filename).
+// Items sheets feed branch totals only (no employee names);
+// sales sheets also feed per-employee totals.
+function sheetTotalsForMonth(month) {
   const sheetRows = db.prepare("SELECT * FROM sheet_uploads WHERE COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
   const seen = new Set();
   const sheets = { sales: 0, invoices: 0, coding: 0, preferred: 0, itemsCount: 0, totalQty: 0, files: [], byEmployee: {} };
@@ -530,16 +526,32 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
     sheets.files.push(u.filename);
     for (const [name, v] of Object.entries(a.byEmployee || {})) {
       const n = String(name).trim();
-      sheets.byEmployee[n] = sheets.byEmployee[n] || { sales: 0, invoices: 0, coding: 0 };
+      sheets.byEmployee[n] = sheets.byEmployee[n] || { sales: 0, invoices: 0, coding: 0, qty: 0 };
       sheets.byEmployee[n].sales += v.sales || 0;
       sheets.byEmployee[n].invoices += v.invoices || 0;
       sheets.byEmployee[n].coding += v.coding || 0;
+      sheets.byEmployee[n].qty += v.qty || 0;
     }
   }
+  return sheets;
+}
+function prevMonthStr(m) {
+  const [y, mo] = m.split('-').map(Number);
+  const d = new Date(y, mo - 2, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+app.get('/api/reports/summary', requireAuth, (req, res) => {
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const settings = getSettings();
+  const emps = db.prepare('SELECT * FROM employees WHERE active=1').all();
+  const wd = workingDays(month);
+  const today = new Date().toISOString().slice(0, 10);
+  const dayNum = month === today.slice(0, 7) ? Number(today.slice(8, 10)) : monthRange(month).daysInMonth;
+  const sheets = sheetTotalsForMonth(month);
   const perEmployee = emps.map(e => {
     const t = employeeTotals(e.id, month);
-    const sh = sheets.byEmployee[e.name.trim()] || { sales: 0, invoices: 0, coding: 0 };
-    t.sales += sh.sales; t.invoices += sh.invoices; t.coding += sh.coding;
+    const sh = sheets.byEmployee[e.name.trim()] || { sales: 0, invoices: 0, coding: 0, qty: 0 };
+    t.sales += sh.sales; t.invoices += sh.invoices; t.coding += sh.coding; t.qty = sh.qty || 0;
     const dailySales = e.monthly_sales / wd;
     const remainingDays = remainingWorkingDays(month, Math.min(dayNum + 1, monthRange(month).daysInMonth));
     const tomorrowSales = Math.max(0, Math.round((e.monthly_sales - t.sales) / remainingDays));
@@ -566,9 +578,13 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
   totals.coding += sheets.coding - perEmployee.reduce((a, e) => a + (sheets.byEmployee[e.name.trim()]?.coding || 0), 0);
   totals.preferred += sheets.preferred;
   const avgInvoice = totals.invoices > 0 ? Math.round(totals.sales / totals.invoices) : 0;
-  // Problems auto-detected from real numbers
+  // Problems auto-detected from real numbers.
+  // No per-employee data at all this month (no sheet rows, no daily entries)
+  // means "no data yet", not "everyone is behind" — skip the false alarms.
+  const anyActivity = perEmployee.some(e => e.achieved.sales > 0 || e.achieved.invoices > 0 || e.achieved.coding > 0);
   const problems = [];
   for (const e of perEmployee) {
+    if (!anyActivity) break;
     if (e.target.sales > 0 && pct(e.achieved.sales, e.target.sales) < 50 && dayNum >= 15) {
       problems.push({ employee: e.name, problem: `مبيعات ${e.name} أقل من 50% من التارجت في منتصف الشهر`, cause: 'مبيعات يومية أقل من المطلوب اليومي', solution: 'راجع المطلوب اليومي مع الموظف، ركز على أصناف الـ Preferred، وتابع نتائجه يوميًا', indicator: 'نسبة تحقيق المبيعات' });
     }
@@ -579,10 +595,31 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
       problems.push({ employee: e.name, problem: `عدد فواتير ${e.name} أقل من 50% من التارجت`, cause: 'عدد عملاء أقل أو فواتير مدمجة', solution: 'شجع الموظف على فصل الفواتير وتقديم خدمة سريعة لكل عميل', indicator: 'عدد الفواتير اليومي' });
     }
   }
-  if (totals.sales < settings.branch_sales * 0.5 && dayNum >= 15) {
+  if (anyActivity && totals.sales < settings.branch_sales * 0.5 && dayNum >= 15) {
     problems.push({ employee: 'الفرع', problem: 'مبيعات الفرع أقل من 50% من التارجت الشهري', cause: 'إجمالي المبيعات اليومية أقل من المطلوب', solution: 'اجتماع سريع مع الفريق، مراجعة الـ Preferred List، وزيادة المتابعة اليومية', indicator: 'نسبة تحقيق مبيعات الفرع' });
   }
-  res.json({ month, settings, workingDays: wd, totals, avgInvoice, perEmployee, problems, sheets });
+  // Leaderboard: rank by % of sales target, with daily pace, month-end
+  // projection, average invoice (ATV), items per invoice (UPT) and
+  // improvement vs last month's % — the live-competition view.
+  const daysInMonth = monthRange(month).daysInMonth;
+  const prevSheets = sheetTotalsForMonth(prevMonthStr(month));
+  const leaderboard = perEmployee.map(e => {
+    const salesPct = pct(e.achieved.sales, e.target.sales);
+    const prev = prevSheets.byEmployee[e.name.trim()] || { sales: 0 };
+    const prevPct = pct(prev.sales || 0, e.target.sales);
+    const elapsed = Math.max(1, Math.min(dayNum, daysInMonth));
+    return {
+      id: e.id, name: e.name,
+      salesPct, invPct: pct(e.achieved.invoices, e.target.invoices),
+      achieved: e.achieved, target: e.target,
+      dailyRequired: e.dailyRequired, tomorrow: e.tomorrow,
+      projection: Math.round((e.achieved.sales / elapsed) * daysInMonth),
+      atv: e.achieved.invoices > 0 ? Math.round(e.achieved.sales / e.achieved.invoices) : 0,
+      upt: e.achieved.invoices > 0 ? +((e.achieved.qty || 0) / e.achieved.invoices).toFixed(1) : 0,
+      improved: salesPct - prevPct,
+    };
+  }).sort((a, b) => b.salesPct - a.salesPct).map((r, i) => ({ ...r, rank: i + 1 }));
+  res.json({ month, settings, workingDays: wd, totals, avgInvoice, perEmployee, problems, sheets, leaderboard });
 });
 
 // Smart Performance Coach
@@ -591,11 +628,18 @@ app.get('/api/coach/:employee_id', requireAuth, (req, res) => {
   const e = db.prepare('SELECT * FROM employees WHERE id=?').get(req.params.employee_id);
   if (!e) return res.status(404).json({ error: 'موظف غير موجود' });
   const t = employeeTotals(e.id, month);
+  // Sheet sales count too (the old coach only saw manual daily entries).
+  const sh = sheetTotalsForMonth(month).byEmployee[e.name.trim()] || { sales: 0, invoices: 0, coding: 0 };
+  t.sales += sh.sales; t.invoices += sh.invoices; t.coding += sh.coding;
   const tips = [];
+  if (t.sales === 0 && t.invoices === 0 && t.coding === 0) {
+    tips.push({ cause: 'لا توجد بيانات مسجلة بعد لهذا الشهر', indicator: 'البيانات', amount: 0, suggestion: 'ارفع شيت مبيعات الشهر أو سجّل نتائج اليوم من لوحة الموظف', expected: 'ظهور الأداء الحقيقي بدل التنبيهات' });
+    return res.json({ employee: e.name, tips });
+  }
   const salesPct = pct(t.sales, e.monthly_sales);
-  if (salesPct < 70) tips.push({ cause: 'المبيعات أقل من المطلوب', indicator: 'المبيعات', amount: Math.round(e.monthly_sales - t.sales), suggestion: 'ركز على أصناف الـ Preferred وعلى العملاء المترددين، وراجع المطلوب اليومي كل صباح', expected: 'رفع نسبة تحقيق المبيعات' });
-  if (pct(t.coding, e.monthly_coding) < 70) tips.push({ cause: 'التكويد أقل من المطلوب', indicator: 'التكويد', amount: Math.round(e.monthly_coding - t.coding), suggestion: 'كوّد كل عميل جديد فورًا قبل نهاية الشيفت', expected: 'زيادة قاعدة العملاء' });
-  if (pct(t.invoices, e.monthly_invoices) < 70) tips.push({ cause: 'عدد الفواتير أقل من المطلوب', indicator: 'الفواتير', amount: Math.round(e.monthly_invoices - t.invoices), suggestion: 'سرّع خدمة العملاء ولا تدمج فواتير عملاء مختلفين', expected: 'زيادة عدد الفواتير' });
+  if (e.monthly_sales > 0 && salesPct < 70) tips.push({ cause: 'المبيعات أقل من المطلوب', indicator: 'المبيعات', amount: Math.round(e.monthly_sales - t.sales), suggestion: 'ركز على أصناف الـ Preferred وعلى العملاء المترددين، وراجع المطلوب اليومي كل صباح', expected: 'رفع نسبة تحقيق المبيعات' });
+  if (e.monthly_coding > 0 && pct(t.coding, e.monthly_coding) < 70) tips.push({ cause: 'التكويد أقل من المطلوب', indicator: 'التكويد', amount: Math.round(e.monthly_coding - t.coding), suggestion: 'كوّد كل عميل جديد فورًا قبل نهاية الشيفت', expected: 'زيادة قاعدة العملاء' });
+  if (e.monthly_invoices > 0 && pct(t.invoices, e.monthly_invoices) < 70) tips.push({ cause: 'عدد الفواتير أقل من المطلوب', indicator: 'الفواتير', amount: Math.round(e.monthly_invoices - t.invoices), suggestion: 'سرّع خدمة العملاء ولا تدمج فواتير عملاء مختلفين', expected: 'زيادة عدد الفواتير' });
   if (!tips.length) tips.push({ cause: 'لا توجد مشكلة واضحة', indicator: 'الأداء العام', amount: 0, suggestion: 'حافظ على نفس المعدل اليومي حتى نهاية الشهر', expected: 'تحقيق التارجت كاملًا' });
   res.json({ employee: e.name, tips });
 });
@@ -878,8 +922,8 @@ function analyzeRows(type, rows) {
     const qty = Number(row.qty || row['الكمية'] || row['عدد القطع'] || 0);
     totalSales += sales; totalInvoices += inv; totalCoding += cod; totalQty += qty;
     const emp = String(row.employee || row['الموظف'] || 'غير محدد');
-    byEmployee[emp] = byEmployee[emp] || { sales: 0, invoices: 0, coding: 0 };
-    byEmployee[emp].sales += sales; byEmployee[emp].invoices += inv; byEmployee[emp].coding += cod;
+    byEmployee[emp] = byEmployee[emp] || { sales: 0, invoices: 0, coding: 0, qty: 0 };
+    byEmployee[emp].sales += sales; byEmployee[emp].invoices += inv; byEmployee[emp].coding += cod; byEmployee[emp].qty += qty;
   }
   return {
     totalSales, totalInvoices, totalCoding, totalQty,
