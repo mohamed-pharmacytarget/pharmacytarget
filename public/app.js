@@ -147,7 +147,7 @@ async function renderEmployeeStats(el, empId) {
     <div class="grid">
       <div class="stat">مبيعات الشهر<b>${fmt(e.achieved.sales)} / ${fmt(e.target.sales)}</b>${e.index}%</div>
       <div class="stat">فواتير الشهر<b>${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)}</b></div>
-      <div class="stat">تكويد الشهر<b>${fmt(e.achieved.coding)} / ${fmt(e.target.coding)}</b></div>
+      <div class="stat">نسبة الفواتير بكود<b>${e.achieved.codingRate || 0}%</b></div>
       <div class="stat">المطلوب اليوم — مبيعات<b>${fmt(e.dailyRequired.sales)} ج</b></div>
       <div class="stat">المطلوب اليوم — فواتير<b>${fmt(e.dailyRequired.invoices)}</b></div>
       <div class="stat">المطلوب اليوم — تكويد<b>${fmt(e.dailyRequired.coding)}</b></div>
