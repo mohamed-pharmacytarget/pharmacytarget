@@ -75,11 +75,14 @@ async function render() {
 async function renderDashboard(v) {
   const monthInput = `<label>الشهر <input type="month" id="month-pick" value="${month}"></label>`;
   if (user.role === 'employee') {
+    const lockedEmp = employees.length === 1 ? employees[0] : null;
+    if (lockedEmp) selectedEmployeeId = lockedEmp.id;
     v.innerHTML = `<div class="card">${monthInput}
-      <label>اختر اسمك <select id="emp-pick">${employees.map(e => `<option value="${e.id}" ${e.id === selectedEmployeeId ? 'selected' : ''}>${e.name}</option>`).join('')}</select></label>
+      ${lockedEmp ? `<p><b>${lockedEmp.name}</b></p>` : `<label>اختر اسمك <select id="emp-pick">${employees.map(e => `<option value="${e.id}" ${e.id === selectedEmployeeId ? 'selected' : ''}>${e.name}</option>`).join('')}</select></label>`}
       <div id="emp-stats"></div><div id="emp-coach"></div></div>`;
     $('#month-pick').addEventListener('change', (e) => { month = e.target.value; render(); });
-    $('#emp-pick').addEventListener('change', (e) => { selectedEmployeeId = Number(e.target.value); render(); });
+    const pickEl = $('#emp-pick');
+    if (pickEl) pickEl.addEventListener('change', (e) => { selectedEmployeeId = Number(e.target.value); render(); });
     await renderEmployeeStats($('#emp-stats'), selectedEmployeeId);
     const coach = await api(`/api/coach/${selectedEmployeeId}?month=${month}`);
     $('#emp-coach').innerHTML = `<h3>Smart Performance Coach</h3>` + coach.tips.map(t =>
@@ -410,24 +413,26 @@ async function renderAudit(v) {
 
 // ---------- Employee daily entry ----------
 async function renderMyDay(v) {
+  const lockedEmp = employees.length === 1 ? employees[0] : null;
+  if (lockedEmp) selectedEmployeeId = lockedEmp.id;
   v.innerHTML = `<div class="card"><h2>تسجيل نتائج اليوم — بعد نهاية الشيفت</h2>
-    <label>اختر اسمك <select id="emp-pick">${employees.map(e => `<option value="${e.id}" ${e.id === selectedEmployeeId ? 'selected' : ''}>${e.name}</option>`).join('')}</select></label>
+    ${lockedEmp ? `<p><b>${lockedEmp.name}</b></p>` : `<label>اختر اسمك <select id="emp-pick">${employees.map(e => `<option value="${e.id}" ${e.id === selectedEmployeeId ? 'selected' : ''}>${e.name}</option>`).join('')}</select></label>`}
     <form id="day-form">
       <label>التاريخ <input id="d-date" type="date" value="${today()}" required></label>
       <label>المبيعات (جنيه) <input id="d-sales" type="number" value="0"></label>
       <label>عدد الفواتير <input id="d-inv" type="number" value="0"></label>
       <label>التكويد <input id="d-cod" type="number" value="0"></label>
-      <label>التوصيل <input id="d-del" type="number" value="0"></label>
       <label>قيمة Preferred اليوم (جنيه) <input id="d-pref" type="number" value="0"></label>
       <button type="submit">حفظ نتائج اليوم</button> <span id="day-msg"></span>
     </form>
     <div id="day-report"></div></div>`;
-  $('#emp-pick').addEventListener('change', (e) => { selectedEmployeeId = Number(e.target.value); render(); });
+  const pickEl = $('#emp-pick');
+  if (pickEl) pickEl.addEventListener('change', (e) => { selectedEmployeeId = Number(e.target.value); render(); });
   const showReport = async () => { await renderEmployeeStats($('#day-report'), selectedEmployeeId); };
   await showReport();
   $('#day-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    await api('/api/daily', { method: 'POST', body: JSON.stringify({ employee_id: selectedEmployeeId, date: $('#d-date').value, sales: $('#d-sales').value, invoices: $('#d-inv').value, coding: $('#d-cod').value, delivery: $('#d-del').value, preferred_value: $('#d-pref').value }) });
+    await api('/api/daily', { method: 'POST', body: JSON.stringify({ employee_id: selectedEmployeeId, date: $('#d-date').value, sales: $('#d-sales').value, invoices: $('#d-inv').value, coding: $('#d-cod').value, preferred_value: $('#d-pref').value }) });
     $('#day-msg').textContent = 'تم الحفظ — ظهرت النتائج في لوحة المدير فورًا';
     await showReport();
   });
