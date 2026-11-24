@@ -415,6 +415,42 @@ app.post('/api/employees', requireRole('owner', 'manager', 'superadmin'), (req, 
     res.status(400).json({ error: 'اليوزر موجود بالفعل' });
   }
 });
+// One-shot batch: add many employees + delete demo ones + tweak branch targets
+// in a SINGLE request, so the Blob sync cannot lose writes between calls.
+app.post('/api/employees/batch', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const { employees, delete_ids, branch_invoices } = req.body || {};
+  const added = [], skipped = [], deleted = [];
+  if (Array.isArray(employees)) {
+    for (const emp of employees) {
+      const name = String(emp.name || '').trim();
+      const username = String(emp.username || '').trim();
+      if (!name || !username) { skipped.push({ name, reason: 'missing name/username' }); continue; }
+      try {
+        const hash = bcrypt.hashSync(String(emp.password || '1234'), 10);
+        const u = db.prepare('INSERT INTO users (username, password_hash, role, name) VALUES (?, ?, ?, ?)')
+          .run(username, hash, 'employee', name);
+        const e = db.prepare('INSERT INTO employees (user_id, name, username, monthly_sales, monthly_invoices, monthly_coding, custom_items) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(u.lastInsertRowid, name, username,
+            Number(emp.monthly_sales) || 0, Number(emp.monthly_invoices) || 0, Number(emp.monthly_coding) || 0,
+            JSON.stringify(Array.isArray(emp.custom_items) ? emp.custom_items : []));
+        added.push({ id: e.lastInsertRowid, name, username });
+      } catch (err) {
+        skipped.push({ name, username, reason: 'username exists' });
+      }
+    }
+  }
+  if (Array.isArray(delete_ids)) {
+    for (const id of delete_ids) {
+      db.prepare('UPDATE employees SET active=0 WHERE id=?').run(Number(id));
+      deleted.push(Number(id));
+    }
+  }
+  if (branch_invoices !== undefined) {
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('branch_invoices', String(Number(branch_invoices) || 0));
+  }
+  audit(me(req).username, 'batch_employees', `إضافة جماعية ${added.length} موظف، حذف ${deleted.length}`);
+  res.json({ ok: true, added, skipped, deleted });
+});
 app.put('/api/employees/:id', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
   const { name, monthly_sales, monthly_invoices, monthly_coding, custom_items } = req.body || {};
   db.prepare('UPDATE employees SET name=?, monthly_sales=?, monthly_invoices=?, monthly_coding=?, custom_items=? WHERE id=?')
