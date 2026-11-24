@@ -102,6 +102,27 @@ CREATE TABLE IF NOT EXISTS audit_log (
   details TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS customer_profiles (
+  code TEXT PRIMARY KEY,
+  name TEXT,
+  phone TEXT,
+  notes TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS complaints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_code TEXT NOT NULL,
+  text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS loyalty_settings (
+  id INTEGER PRIMARY KEY CHECK (id=1),
+  cashback_rate REAL NOT NULL DEFAULT 1,
+  gold_min REAL NOT NULL DEFAULT 5000,
+  vip_min REAL NOT NULL DEFAULT 20000
+);
 `;
 
 function reopenDb() {
@@ -962,12 +983,21 @@ app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, r
   const month = req.query.month || new Date().toISOString().slice(0, 7);
   const byCode = {};
   const priorCodes = new Set();
+  const priorByCode = {};
+  const priorMonths = {};
   const allUploads = db.prepare("SELECT rows_json, COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7)) m FROM sheet_uploads WHERE type='sales' ORDER BY id").all();
   for (const u of allUploads) {
     for (const row of JSON.parse(u.rows_json || '[]')) {
       const code = String(row.code || '').trim();
       if (!code) continue;
-      if (u.m < month) priorCodes.add(code);
+      if (u.m < month) {
+        priorCodes.add(code);
+        const pc = priorByCode[code] || (priorByCode[code] = { code, sales: 0, invoices: 0, lastDate: '' });
+        pc.sales += Number(row.sales || 0); pc.invoices += 1;
+        if (row.date && (!pc.lastDate || row.date > pc.lastDate)) pc.lastDate = row.date;
+        const pm = priorMonths[u.m] || (priorMonths[u.m] = { sales: 0, invoices: 0, codes: new Set() });
+        pm.sales += Number(row.sales || 0); pm.invoices += 1; pm.codes.add(code);
+      }
     }
   }
   const uploads = db.prepare("SELECT filename, rows_json FROM sheet_uploads WHERE type='sales' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
@@ -993,17 +1023,139 @@ app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, r
       c.employees[emp] = (c.employees[emp] || 0) + 1;
     }
   }
-  const customers = Object.values(byCode).map(c => ({
-    ...c,
-    topEmployee: Object.entries(c.employees).sort((a, b) => b[1] - a[1])[0]?.[0] || '',
-    isNew: !priorCodes.has(c.code),
-  })).sort((a, b) => b.sales - a.sales);
-  res.json({ month,
+  const loyalty = db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get()
+    || { cashback_rate: 1, gold_min: 5000, vip_min: 20000 };
+  const profiles = Object.fromEntries(db.prepare('SELECT * FROM customer_profiles').all().map(r => [r.code, r]));
+  const openComplaints = db.prepare("SELECT COUNT(*) c FROM complaints WHERE status='open'").get().c;
+  const monthEnd = new Date(+month.split('-')[0], +month.split('-')[1], 0);
+  const inactiveBefore = new Date(monthEnd.getTime() - 14 * 86400000).toISOString().slice(0, 10);
+  const customers = Object.values(byCode).map(c => {
+    const prof = profiles[c.code] || {};
+    const tier = c.sales >= loyalty.vip_min ? 'VIP' : c.sales >= loyalty.gold_min ? 'Gold' : 'Silver';
+    return { ...c,
+      name: prof.name || c.name || '',
+      phone: prof.phone || '',
+      notes: prof.notes || '',
+      topEmployee: Object.entries(c.employees).sort((a, b) => b[1] - a[1])[0]?.[0] || '',
+      isNew: !priorCodes.has(c.code),
+      tier,
+      cashback: Math.round(c.sales * loyalty.cashback_rate / 100 * 100) / 100,
+      isInactive: !!c.lastDate && c.lastDate < inactiveBefore,
+    };
+  }).sort((a, b) => b.sales - a.sales);
+  // ---- Advanced analytics (Pharma Care: analytics & reports only) ----
+  const totalSales = customers.reduce((a, c) => a + c.sales, 0);
+  const repeat = customers.filter(c => c.invoices > 1);
+  const top10 = customers.slice(0, 10);
+  const churned = Object.values(priorByCode).filter(c => !byCode[c.code]).sort((a, b) => b.sales - a.sales);
+  const prevMonthKeys = Object.keys(priorMonths).sort();
+  const prevKey = prevMonthKeys.length ? prevMonthKeys[prevMonthKeys.length - 1] : null;
+  const prev = prevKey ? { month: prevKey, sales: Math.round(priorMonths[prevKey].sales * 100) / 100, invoices: priorMonths[prevKey].invoices, customers: priorMonths[prevKey].codes.size } : null;
+  const analytics = {
+    repeatCustomers: repeat.length,
+    repeatRate: customers.length ? Math.round(repeat.length / customers.length * 1000) / 10 : 0,
+    oneTimeCustomers: customers.length - repeat.length,
+    avgInvoicesPerCustomer: customers.length ? Math.round(totalInvoices / customers.length * 10) / 10 : 0,
+    avgSalesPerCustomer: customers.length ? Math.round(totalSales / customers.length) : 0,
+    top10Share: totalSales ? Math.round(top10.reduce((a, c) => a + c.sales, 0) / totalSales * 1000) / 10 : 0,
+    top10: top10.map(c => ({ code: c.code, name: c.name || '', sales: Math.round(c.sales * 100) / 100, invoices: c.invoices, tier: c.tier })),
+    freqBuckets: {
+      one: customers.filter(c => c.invoices === 1).length,
+      twoThree: customers.filter(c => c.invoices >= 2 && c.invoices <= 3).length,
+      fourTen: customers.filter(c => c.invoices >= 4 && c.invoices <= 10).length,
+      overTen: customers.filter(c => c.invoices > 10).length,
+    },
+    segments: {
+      champions: customers.filter(c => c.tier === 'VIP' && c.invoices >= 10).length,
+      atRisk: customers.filter(c => c.sales >= loyalty.gold_min && c.isInactive).length,
+      loyal: customers.filter(c => c.invoices >= 5 && !c.isInactive).length,
+      oneTime: customers.filter(c => c.invoices === 1).length,
+      newCount: customers.filter(c => c.isNew).length,
+    },
+    churned: churned.slice(0, 20).map(c => ({ code: c.code, sales: Math.round(c.sales * 100) / 100, invoices: c.invoices, lastDate: c.lastDate })),
+    churnedCount: churned.length,
+    churnedSales: Math.round(churned.reduce((a, c) => a + c.sales, 0) * 100) / 100,
+    prev,
+    salesChangePct: prev && prev.sales ? Math.round((totalSales - prev.sales) / prev.sales * 1000) / 10 : null,
+    customersChangePct: prev && prev.customers ? Math.round((customers.length - prev.customers) / prev.customers * 1000) / 10 : null,
+  };
+  res.json({ month, loyalty,
     summary: { totalCustomers: customers.length, newCustomers: customers.filter(c => c.isNew).length,
+      activeCustomers: customers.filter(c => !c.isInactive).length,
+      inactiveCustomers: customers.filter(c => c.isInactive).length,
+      vipCustomers: customers.filter(c => c.tier === 'VIP').length,
       totalInvoices, codedInvoices, uncodedInvoices, uncodedSales,
       codingRate: totalInvoices ? Math.round(codedInvoices / totalInvoices * 1000) / 10 : 0,
-      totalSales: customers.reduce((a, c) => a + c.sales, 0) },
-    customers });
+      totalSales,
+      totalCashback: Math.round(customers.reduce((a, c) => a + c.cashback, 0) * 100) / 100,
+      openComplaints },
+    analytics, customers });
+});
+
+// Customer profile (name/phone/notes) — data the bills sheet does not carry.
+app.post('/api/customers/profile', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const { code, name, phone, notes } = req.body || {};
+  if (!String(code || '').trim()) return res.status(400).json({ error: 'الكود مطلوب' });
+  db.prepare(`INSERT INTO customer_profiles (code, name, phone, notes, updated_at)
+    VALUES (?,?,?,?,datetime('now'))
+    ON CONFLICT(code) DO UPDATE SET name=excluded.name, phone=excluded.phone, notes=excluded.notes, updated_at=datetime('now')`)
+    .run(String(code).trim(), String(name || '').trim(), String(phone || '').trim(), String(notes || '').trim());
+  persistDb(); res.json({ ok: true });
+});
+
+// Complaints log.
+app.get('/api/complaints', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  res.json(db.prepare("SELECT * FROM complaints ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, id DESC").all());
+});
+app.post('/api/complaints', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const { customer_code, text } = req.body || {};
+  if (!String(customer_code || '').trim() || !String(text || '').trim()) return res.status(400).json({ error: 'الكود ونص الشكوى مطلوبين' });
+  const r = db.prepare('INSERT INTO complaints (customer_code, text) VALUES (?,?)').run(String(customer_code).trim(), String(text).trim());
+  persistDb(); res.json({ ok: true, id: r.lastInsertRowid });
+});
+app.post('/api/complaints/:id/resolve', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  db.prepare("UPDATE complaints SET status='resolved', resolved_at=datetime('now') WHERE id=?").run(req.params.id);
+  persistDb(); res.json({ ok: true });
+});
+
+// Loyalty settings: cashback % and tier thresholds.
+app.get('/api/loyalty/settings', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  res.json(db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get() || { cashback_rate: 1, gold_min: 5000, vip_min: 20000 });
+});
+app.post('/api/loyalty/settings', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const { cashback_rate, gold_min, vip_min } = req.body || {};
+  db.prepare(`INSERT INTO loyalty_settings (id, cashback_rate, gold_min, vip_min) VALUES (1,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET cashback_rate=excluded.cashback_rate, gold_min=excluded.gold_min, vip_min=excluded.vip_min`)
+    .run(Number(cashback_rate) || 0, Number(gold_min) || 0, Number(vip_min) || 0);
+  persistDb(); res.json({ ok: true });
+});
+
+// Customers report CSV export
+app.get('/api/customers.csv', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const uploads = db.prepare("SELECT filename, rows_json FROM sheet_uploads WHERE type='sales' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
+  const seenUp = new Set(); const byCode = {};
+  for (const u of uploads) {
+    if (seenUp.has(u.filename)) continue; seenUp.add(u.filename);
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      const code = String(row.code || '').trim(); if (!code) continue;
+      const c = byCode[code] || (byCode[code] = { code, name: row.customer || '', invoices: 0, sales: 0, firstDate: '', lastDate: '' });
+      c.invoices += 1; c.sales += Number(row.sales || 0);
+      if (row.date) { if (!c.firstDate || row.date < c.firstDate) c.firstDate = row.date; if (!c.lastDate || row.date > c.lastDate) c.lastDate = row.date; }
+    }
+  }
+  const profiles = Object.fromEntries(db.prepare('SELECT * FROM customer_profiles').all().map(r => [r.code, r]));
+  const loyalty = db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get() || { cashback_rate: 1, gold_min: 5000, vip_min: 20000 };
+  let csv = '\uFEFFالكود,الاسم,التليفون,المستوى,عدد الفواتير,إجمالي المشتريات,كاش باك,أول زيارة,آخر زيارة\n';
+  for (const c of Object.values(byCode).sort((a, b) => b.sales - a.sales)) {
+    const prof = profiles[c.code] || {};
+    const tier = c.sales >= loyalty.vip_min ? 'VIP' : c.sales >= loyalty.gold_min ? 'Gold' : 'Silver';
+    const cb = Math.round(c.sales * loyalty.cashback_rate / 100 * 100) / 100;
+    csv += `${c.code},"${(prof.name || c.name || '').replace(/"/g, '""')}","${prof.phone || ''}",${tier},${c.invoices},${Math.round(c.sales * 100) / 100},${cb},${c.firstDate},${c.lastDate}\n`;
+  }
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="customers-${month}.csv"`);
+  res.send(csv);
 });
 
 // CSV export
