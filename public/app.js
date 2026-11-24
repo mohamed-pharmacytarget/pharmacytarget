@@ -360,13 +360,14 @@ function renderUploads(v) {
     <p>اسحب تقرير المبيعات الشهري أو تقرير مبيعات الأصناف من تطبيق الصيدلية وارفعه هنا (Excel أو CSV). التطبيق يحلل الشيت ويقول حققنا ولا لأ.</p>
     <form id="up-form">
       <label>نوع التقرير <select id="up-type"><option value="sales">تقرير مبيعات شهري</option><option value="items">تقرير مبيعات أصناف</option></select></label>
+      <label>الشهر <input id="up-month" type="month"></label>
       <label>الملف <input id="up-file" type="file" accept=".xlsx,.xls,.csv" required></label>
       <button type="submit">رفع وتحليل</button>
     </form>
     <div id="up-result"></div>
     <h3>ملفات مرفوعة سابقًا</h3><div id="up-list"></div></div>`;
   api('/api/uploads').then(list => {
-    $('#up-list').innerHTML = list.length ? `<table><tr><th>الملف</th><th>النوع</th><th>رفعه</th><th>التاريخ</th><th></th><th></th></tr>${list.map(u => `<tr><td>${u.filename}</td><td>${u.type === 'sales' ? 'مبيعات شهري' : u.type === 'preferred' ? 'شيت Preferred' : 'مبيعات أصناف'}</td><td>${u.uploaded_by}</td><td>${u.created_at}</td><td><button data-viewup="${u.id}">عرض التحليل</button></td><td><button class="danger" data-delup="${u.id}">حذف</button></td></tr>`).join('')}</table>` : '<p>لا توجد ملفات بعد.</p>';
+    $('#up-list').innerHTML = list.length ? `<table><tr><th>الملف</th><th>النوع</th><th>الشهر</th><th>رفعه</th><th>التاريخ</th><th></th><th></th></tr>${list.map(u => `<tr><td>${u.filename}</td><td>${u.type === 'sales' ? 'مبيعات شهري' : u.type === 'preferred' ? 'شيت Preferred' : 'مبيعات أصناف'}</td><td>${u.sheet_month || u.created_at.slice(0, 7)}</td><td>${u.uploaded_by}</td><td>${u.created_at}</td><td><button data-viewup="${u.id}">عرض التحليل</button></td><td><button class="danger" data-delup="${u.id}">حذف</button></td></tr>`).join('')}</table>` : '<p>لا توجد ملفات بعد.</p>';
     document.querySelectorAll('[data-viewup]').forEach(b => b.addEventListener('click', async () => {
       const d = await api(`/api/uploads/${b.dataset.viewup}/analysis`);
       showUploadAnalysis(d.analysis);
@@ -378,11 +379,13 @@ function renderUploads(v) {
       render();
     }));
   });
+  $('#up-month').value = new Date().toISOString().slice(0, 7);
   $('#up-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData();
     fd.append('file', $('#up-file').files[0]);
     fd.append('type', $('#up-type').value);
+    fd.append('month', $('#up-month').value);
     const r = await fetch('/api/uploads', { method: 'POST', body: fd });
     const d = await r.json();
     if (!r.ok) { $('#up-result').innerHTML = `<p class="error">${d.error}</p>`; return; }
