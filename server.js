@@ -121,7 +121,9 @@ CREATE TABLE IF NOT EXISTS loyalty_settings (
   id INTEGER PRIMARY KEY CHECK (id=1),
   cashback_rate REAL NOT NULL DEFAULT 1,
   gold_min REAL NOT NULL DEFAULT 5000,
-  vip_min REAL NOT NULL DEFAULT 20000
+  vip_min REAL NOT NULL DEFAULT 20000,
+  cashback_per_500 REAL NOT NULL DEFAULT 25,
+  cashback_step REAL NOT NULL DEFAULT 500
 );
 `;
 
@@ -144,6 +146,11 @@ function migrateDb() {
     if (!cols.includes('category')) db.exec("ALTER TABLE preferred_items ADD COLUMN category TEXT NOT NULL DEFAULT ''");
     const ucols = db.prepare("PRAGMA table_info(sheet_uploads)").all().map(c => c.name);
     if (!ucols.includes('sheet_month')) db.exec("ALTER TABLE sheet_uploads ADD COLUMN sheet_month TEXT NOT NULL DEFAULT ''");
+    const lcols = db.prepare("PRAGMA table_info(loyalty_settings)").all().map(c => c.name);
+    if (lcols.length && !lcols.includes('cashback_per_500')) db.exec("ALTER TABLE loyalty_settings ADD COLUMN cashback_per_500 REAL NOT NULL DEFAULT 25");
+    if (lcols.length && !lcols.includes('cashback_step')) db.exec("ALTER TABLE loyalty_settings ADD COLUMN cashback_step REAL NOT NULL DEFAULT 500");
+    const pcols = db.prepare("PRAGMA table_info(customer_profiles)").all().map(c => c.name);
+    if (pcols.length && !pcols.includes('excluded')) db.exec("ALTER TABLE customer_profiles ADD COLUMN excluded REAL NOT NULL DEFAULT 0");
   } catch (e) { console.error('migrate failed', e); }
 }
 
@@ -619,6 +626,36 @@ function sheetTotalsForMonth(month) {
   }
   return sheets;
 }
+// Milk + diapers (excluded from cashback): infant formula brands and diapers.
+// Wipes are NOT diapers. "نان" must be a whole word (not "اسنان" = teeth).
+const EXCLUDED_ITEM_RE = /bebelac|aptamil|similac|nestogen|nutrilon|s-26|pampers|molfix|huggies|babyjoy|fine baby|novalac|primalac|liptomil|بيبيلاك|ببلاك|ابتاميل|أبتاميل|سيميلاك|نستوجين|نوفالاك|بريمالاك|ليبتوميل|حليب أطفال|لبن أطفال|حفاض|حفاظ|بامبرز|مولفكس|بيبي جوي|فاين بيبي|هجيز/i;
+const NAN_WORD_RE = /(^|[\s\-])نان([\s\-]|$)/;
+const HERO_FORMULA_RE = /hero baby\s*[123]/i;
+function isExcludedItem(name) {
+  const n = String(name || '');
+  if (/wipes/i.test(n)) return false;
+  return EXCLUDED_ITEM_RE.test(n) || NAN_WORD_RE.test(n) || HERO_FORMULA_RE.test(n);
+}
+// Branch total of milk + diapers in the month, from the items sheets.
+function excludedBranchTotal(month) {
+  const uploads = db.prepare("SELECT filename, rows_json FROM sheet_uploads WHERE type='items' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
+  const seen = new Set(); let total = 0;
+  for (const u of uploads) {
+    if (seen.has(u.filename)) continue; seen.add(u.filename);
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      const item = String(row.item || row['الصنف'] || row['الإسم'] || '').trim();
+      if (isExcludedItem(item)) total += Number(row.value || row['القيمة'] || row.total || 0) || 0;
+    }
+  }
+  return Math.round(total * 100) / 100;
+}
+// Cashback rule: every full 500 EGP (after excluding milk/diapers) earns 25.
+// 800 -> 25, 1000 -> 50. The 500 step is fixed.
+function cashbackFor(sales, excluded, ly) {
+  const step = Number(ly.cashback_step) || 500;
+  const per = ly.cashback_per_500 ?? 25;
+  return Math.floor(Math.max(0, (Number(sales) || 0) - (Number(excluded) || 0)) / step) * per;
+}
 function prevMonthStr(m) {
   const [y, mo] = m.split('-').map(Number);
   const d = new Date(y, mo - 2, 1);
@@ -1024,7 +1061,7 @@ app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, r
     }
   }
   const loyalty = db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get()
-    || { cashback_rate: 1, gold_min: 5000, vip_min: 20000 };
+    || { cashback_rate: 1, gold_min: 5000, vip_min: 20000, cashback_per_500: 25, cashback_step: 500 };
   const profiles = Object.fromEntries(db.prepare('SELECT * FROM customer_profiles').all().map(r => [r.code, r]));
   const openComplaints = db.prepare("SELECT COUNT(*) c FROM complaints WHERE status='open'").get().c;
   const monthEnd = new Date(+month.split('-')[0], +month.split('-')[1], 0);
@@ -1039,7 +1076,8 @@ app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, r
       topEmployee: Object.entries(c.employees).sort((a, b) => b[1] - a[1])[0]?.[0] || '',
       isNew: !priorCodes.has(c.code),
       tier,
-      cashback: Math.round(c.sales * loyalty.cashback_rate / 100 * 100) / 100,
+      excluded: prof.excluded || 0,
+      cashback: cashbackFor(c.sales, prof.excluded || 0, loyalty),
       isInactive: !!c.lastDate && c.lastDate < inactiveBefore,
     };
   }).sort((a, b) => b.sales - a.sales);
@@ -1088,18 +1126,19 @@ app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, r
       codingRate: totalInvoices ? Math.round(codedInvoices / totalInvoices * 1000) / 10 : 0,
       totalSales,
       totalCashback: Math.round(customers.reduce((a, c) => a + c.cashback, 0) * 100) / 100,
+      excludedBranch: excludedBranchTotal(month),
       openComplaints },
     analytics, customers });
 });
 
 // Customer profile (name/phone/notes) — data the bills sheet does not carry.
 app.post('/api/customers/profile', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
-  const { code, name, phone, notes } = req.body || {};
+  const { code, name, phone, notes, excluded } = req.body || {};
   if (!String(code || '').trim()) return res.status(400).json({ error: 'الكود مطلوب' });
-  db.prepare(`INSERT INTO customer_profiles (code, name, phone, notes, updated_at)
-    VALUES (?,?,?,?,datetime('now'))
-    ON CONFLICT(code) DO UPDATE SET name=excluded.name, phone=excluded.phone, notes=excluded.notes, updated_at=datetime('now')`)
-    .run(String(code).trim(), String(name || '').trim(), String(phone || '').trim(), String(notes || '').trim());
+  db.prepare(`INSERT INTO customer_profiles (code, name, phone, notes, excluded, updated_at)
+    VALUES (?,?,?,?,?,datetime('now'))
+    ON CONFLICT(code) DO UPDATE SET name=excluded.name, phone=excluded.phone, notes=excluded.notes, excluded=excluded.excluded, updated_at=datetime('now')`)
+    .run(String(code).trim(), String(name || '').trim(), String(phone || '').trim(), String(notes || '').trim(), Number(excluded) || 0);
   persistDb(); res.json({ ok: true });
 });
 
@@ -1118,15 +1157,15 @@ app.post('/api/complaints/:id/resolve', requireRole('owner', 'manager', 'superad
   persistDb(); res.json({ ok: true });
 });
 
-// Loyalty settings: cashback % and tier thresholds.
+// Loyalty settings: cashback step rule (every full 500 -> 25) and tier thresholds.
 app.get('/api/loyalty/settings', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
-  res.json(db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get() || { cashback_rate: 1, gold_min: 5000, vip_min: 20000 });
+  res.json(db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get() || { cashback_rate: 1, gold_min: 5000, vip_min: 20000, cashback_per_500: 25, cashback_step: 500 });
 });
 app.post('/api/loyalty/settings', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
-  const { cashback_rate, gold_min, vip_min } = req.body || {};
-  db.prepare(`INSERT INTO loyalty_settings (id, cashback_rate, gold_min, vip_min) VALUES (1,?,?,?)
-    ON CONFLICT(id) DO UPDATE SET cashback_rate=excluded.cashback_rate, gold_min=excluded.gold_min, vip_min=excluded.vip_min`)
-    .run(Number(cashback_rate) || 0, Number(gold_min) || 0, Number(vip_min) || 0);
+  const { cashback_per_500, cashback_step, gold_min, vip_min } = req.body || {};
+  db.prepare(`INSERT INTO loyalty_settings (id, cashback_per_500, cashback_step, gold_min, vip_min) VALUES (1,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET cashback_per_500=excluded.cashback_per_500, cashback_step=excluded.cashback_step, gold_min=excluded.gold_min, vip_min=excluded.vip_min`)
+    .run(Number(cashback_per_500) || 0, Number(cashback_step) || 500, Number(gold_min) || 0, Number(vip_min) || 0);
   persistDb(); res.json({ ok: true });
 });
 
@@ -1145,13 +1184,13 @@ app.get('/api/customers.csv', requireRole('owner', 'manager', 'superadmin'), (re
     }
   }
   const profiles = Object.fromEntries(db.prepare('SELECT * FROM customer_profiles').all().map(r => [r.code, r]));
-  const loyalty = db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get() || { cashback_rate: 1, gold_min: 5000, vip_min: 20000 };
-  let csv = '\uFEFFالكود,الاسم,التليفون,المستوى,عدد الفواتير,إجمالي المشتريات,كاش باك,أول زيارة,آخر زيارة\n';
+  const loyalty = db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get() || { cashback_rate: 1, gold_min: 5000, vip_min: 20000, cashback_per_500: 25, cashback_step: 500 };
+  let csv = '\uFEFFالكود,الاسم,التليفون,المستوى,عدد الفواتير,إجمالي المشتريات,مستبعد (ألبان وحفاضات),كاش باك,أول زيارة,آخر زيارة\n';
   for (const c of Object.values(byCode).sort((a, b) => b.sales - a.sales)) {
     const prof = profiles[c.code] || {};
     const tier = c.sales >= loyalty.vip_min ? 'VIP' : c.sales >= loyalty.gold_min ? 'Gold' : 'Silver';
-    const cb = Math.round(c.sales * loyalty.cashback_rate / 100 * 100) / 100;
-    csv += `${c.code},"${(prof.name || c.name || '').replace(/"/g, '""')}","${prof.phone || ''}",${tier},${c.invoices},${Math.round(c.sales * 100) / 100},${cb},${c.firstDate},${c.lastDate}\n`;
+    const cb = cashbackFor(c.sales, prof.excluded || 0, loyalty);
+    csv += `${c.code},"${(prof.name || c.name || '').replace(/"/g, '""')}","${prof.phone || ''}",${tier},${c.invoices},${Math.round(c.sales * 100) / 100},${prof.excluded || 0},${cb},${c.firstDate},${c.lastDate}\n`;
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="customers-${month}.csv"`);
