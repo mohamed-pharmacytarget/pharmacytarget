@@ -719,6 +719,34 @@ app.get('/api/export.csv', requireAuth, (req, res) => {
   res.send('\ufeff' + csv);
 });
 
+// Preferred sales for a month (branch total + per-category), from items sheets.
+// Manager/owner only: the items sheets have no employee split, so this is branch-level.
+app.get('/api/preferred/sales', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const norm = v => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ').trim();
+  const prefMap = new Map(db.prepare('SELECT name, category FROM preferred_items WHERE active=1').all()
+    .map(r => [norm(r.name), r.category || 'بدون فئة']));
+  const uploads = db.prepare("SELECT * FROM sheet_uploads WHERE type='items' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
+  const seen = new Set();
+  let branchPreferred = 0; const byCat = {};
+  for (const u of uploads) {
+    const key = `${u.type}|${u.filename}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      const item = String(row.item || row['الصنف'] || row['الإسم'] || '').trim();
+      const v = Number(row.value || row['القيمة'] || row.total || 0) || 0;
+      const cat = prefMap.get(norm(item));
+      if (cat) {
+        branchPreferred += v;
+        const b = byCat[cat] || (byCat[cat] = { category: cat, value: 0, count: 0 });
+        b.value += v; b.count += 1;
+      }
+    }
+  }
+  res.json({ month, branchPreferred, byCategory: Object.values(byCat).sort((a, b) => b.value - a.value) });
+});
+
 // ---------- Sheet uploads (Excel / CSV) ----------
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
