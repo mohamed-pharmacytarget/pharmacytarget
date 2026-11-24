@@ -98,7 +98,7 @@ async function renderDashboard(v) {
     <div class="grid">
       <div class="stat">المبيعات<b>${fmt(rep.totals.sales)} / ${fmt(rep.settings.branch_sales)}</b>${Math.round(rep.totals.sales / rep.settings.branch_sales * 100)}%</div>
       <div class="stat">الفواتير<b>${fmt(rep.totals.invoices)} / ${fmt(rep.settings.branch_invoices)}</b></div>
-      <div class="stat">التكويد<b>${fmt(rep.totals.coding)} / ${fmt(rep.settings.branch_coding)}</b>${rep.totals.invoices ? `فواتير بكود: ${rep.totals.codingRate}%${rep.totals.codingRateTarget ? ` — تارجت الشهر الجاي: ${rep.totals.codingRateTarget}%` : ''}` : ''}</div>
+      <div class="stat">التكويد — فواتير بكود<b>${rep.totals.codingRate || 0}%</b>${rep.totals.codingRateTarget ? `تارجت الشهر الجاي: ${rep.totals.codingRateTarget}%` : ''}</div>
       <div class="stat">متوسط الفاتورة<b>${fmt(rep.avgInvoice)} ج</b></div>
       <div class="stat">Preferred<b>${fmt(rep.totals.preferred)} ج</b></div>
       ${rep.sheets && rep.sheets.itemsCount ? `<div class="stat">عدد الأصناف<b>${fmt(rep.sheets.itemsCount)}</b></div>` : ''}
