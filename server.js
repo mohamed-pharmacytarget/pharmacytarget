@@ -122,6 +122,14 @@ CREATE TABLE IF NOT EXISTS loyalty_settings (
   gold_min REAL NOT NULL DEFAULT 5000,
   vip_min REAL NOT NULL DEFAULT 20000
 );
+CREATE TABLE IF NOT EXISTS recovery_contacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_code TEXT NOT NULL,
+  month TEXT NOT NULL,
+  contacted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  contacted_by TEXT NOT NULL DEFAULT '',
+  UNIQUE(customer_code, month)
+);
 `;
 
 function reopenDb() {
@@ -1120,6 +1128,168 @@ app.get('/api/customers', requireRole('owner', 'manager', 'superadmin'), (req, r
       totalSales,
       openComplaints },
     analytics, customers });
+});
+
+// ---------- Customer recovery engine (Feature 1) ----------
+// Same sales-sheet aggregation as /api/customers, kept as a separate helper so the
+// customers endpoint stays untouched. Returns per-customer rows WITH dates (needed
+// for the average visit gap); callers map them to the shape they send.
+function computeCustomerData(month) {
+  const byCode = {};
+  const priorCodes = new Set();
+  const priorByCode = {};
+  const allUploads = db.prepare("SELECT rows_json, COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7)) m FROM sheet_uploads WHERE type='sales' ORDER BY id").all();
+  for (const u of allUploads) {
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      const code = String(row.code || '').trim();
+      if (!code) continue;
+      if (u.m < month) {
+        priorCodes.add(code);
+        const pc = priorByCode[code] || (priorByCode[code] = { code, sales: 0, invoices: 0, lastDate: '' });
+        pc.sales += Number(row.sales || 0); pc.invoices += 1;
+        if (row.date && (!pc.lastDate || row.date > pc.lastDate)) pc.lastDate = row.date;
+      }
+    }
+  }
+  const uploads = db.prepare("SELECT filename, rows_json FROM sheet_uploads WHERE type='sales' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
+  const seenUp = new Set();
+  let totalInvoices = 0, codedInvoices = 0;
+  for (const u of uploads) {
+    if (seenUp.has(u.filename)) continue;
+    seenUp.add(u.filename);
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      totalInvoices += 1;
+      const code = String(row.code || '').trim();
+      const sales = Number(row.sales || 0);
+      if (!code) continue;
+      codedInvoices += 1;
+      const c = byCode[code] || (byCode[code] = { code, name: '', invoices: 0, sales: 0, firstDate: row.date || '', lastDate: row.date || '', dates: [] });
+      c.invoices += 1; c.sales += sales;
+      if (row.customer) c.name = row.customer;
+      if (row.date) {
+        if (!c.firstDate || row.date < c.firstDate) c.firstDate = row.date;
+        if (!c.lastDate || row.date > c.lastDate) c.lastDate = row.date;
+        c.dates.push(row.date);
+      }
+    }
+  }
+  const loyalty = db.prepare('SELECT * FROM loyalty_settings WHERE id=1').get()
+    || { gold_min: 5000, vip_min: 20000 };
+  const profiles = Object.fromEntries(db.prepare('SELECT * FROM customer_profiles').all().map(r => [r.code, r]));
+  const monthEnd = new Date(+month.split('-')[0], +month.split('-')[1], 0);
+  const inactiveBefore = new Date(monthEnd.getTime() - 14 * 86400000).toISOString().slice(0, 10);
+  const customers = Object.values(byCode).filter(c => c.code !== '1' && c.code !== '444').map(c => {
+    const prof = profiles[c.code] || {};
+    const tier = c.sales >= loyalty.vip_min ? 'VIP' : c.sales >= loyalty.gold_min ? 'Gold' : 'Silver';
+    return { ...c,
+      name: prof.name || c.name || '',
+      phone: prof.phone || '',
+      tier,
+      isNew: !priorCodes.has(c.code),
+      isInactive: !!c.lastDate && c.lastDate < inactiveBefore,
+    };
+  }).sort((a, b) => b.sales - a.sales);
+  const churned = Object.values(priorByCode).filter(c => !byCode[c.code] && c.code !== '1' && c.code !== '444').sort((a, b) => b.sales - a.sales);
+  return { month, loyalty, profiles, customers, priorByCode, churned,
+    totals: { totalInvoices, codedInvoices } };
+}
+const DAY_MS = 86400000;
+function addDaysIso(iso, n) { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function avgGapOf(c) {
+  const days = [...new Set(c.dates || [])].sort();
+  if (days.length < 3) return null;
+  let sum = 0;
+  for (let i = 1; i < days.length; i++) sum += (new Date(days[i]) - new Date(days[i - 1])) / DAY_MS;
+  return Math.max(1, Math.round(sum / (days.length - 1)));
+}
+// Priority score = customer value (month sales) × churn probability.
+// Churn probability: segment base, raised when the customer is overdue vs their usual
+// visit gap (1.5× the usual gap = early warning, the Feature 2 rule).
+function recoveryPool(month) {
+  const d = computeCustomerData(month);
+  const { daysInMonth } = monthRange(month);
+  const asOf = `${month}-${String(daysInMonth).padStart(2, '0')}`;
+  // No bills sheet for the month yet: nobody is "churned", the pool is empty.
+  if (!d.totals.totalInvoices) return { pool: [], asOf };
+  const asOfMs = new Date(asOf + 'T00:00:00Z').getTime();
+  const generic = c => c.code === '0' || c.code === '1' || c.code === '444';
+  const pool = [];
+  for (const c of d.customers) {
+    if (generic(c)) continue;
+    const daysSince = c.lastDate ? Math.floor((asOfMs - new Date(c.lastDate + 'T00:00:00Z').getTime()) / DAY_MS) : null;
+    const gap = avgGapOf(c);
+    let segment = null, base = 0;
+    if (c.tier === 'VIP' && c.isInactive) { segment = 'vip'; base = 0.9; }
+    else if (c.sales >= d.loyalty.gold_min && c.isInactive) { segment = 'atrisk'; base = 0.85; }
+    else if (c.isInactive) { segment = 'inactive'; base = 0.7; }
+    else if (c.invoices === 1) { segment = 'onetime'; base = 0.45; }
+    else continue;
+    let p = base;
+    if (gap && daysSince !== null) {
+      if (daysSince >= 1.5 * gap) p = Math.max(p, 0.9);
+      else if (daysSince > gap) p = Math.min(0.95, p + 0.1 * (daysSince - gap) / gap);
+    }
+    pool.push({ code: c.code, name: c.name || '', phone: c.phone || '', segment,
+      invoices: c.invoices, sales: Math.round(c.sales * 100) / 100,
+      avgPurchase: c.invoices ? Math.round(c.sales / c.invoices) : 0,
+      lastDate: c.lastDate || '', daysSince, avgGap: gap,
+      churnPct: Math.round(p * 100), score: Math.round(c.sales * p) });
+  }
+  // Customers who bought before but did not come at all this month (churned).
+  for (const pc of d.churned) {
+    if (generic(pc)) continue;
+    const prof = d.profiles[pc.code] || {};
+    const daysSince = pc.lastDate ? Math.floor((asOfMs - new Date(pc.lastDate + 'T00:00:00Z').getTime()) / DAY_MS) : null;
+    pool.push({ code: pc.code, name: prof.name || '', phone: prof.phone || '', segment: 'atrisk',
+      invoices: 0, sales: Math.round(pc.sales * 100) / 100,
+      avgPurchase: pc.invoices ? Math.round(pc.sales / pc.invoices) : 0,
+      lastDate: pc.lastDate || '', daysSince, avgGap: null,
+      churnPct: 90, score: Math.round(pc.sales * 0.9), churned: true });
+  }
+  pool.sort((a, b) => b.score - a.score);
+  return { pool, asOf };
+}
+app.get('/api/recovery', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const { pool, asOf } = recoveryPool(month);
+  const contacts = db.prepare('SELECT * FROM recovery_contacts WHERE month=? ORDER BY contacted_at DESC').all(month);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const recent = new Set(contacts.filter(ct => ct.contacted_at.slice(0, 10) >= addDaysIso(todayIso, -7)).map(ct => ct.customer_code));
+  // Returned = the customer has a bill dated after the contact date (any month).
+  const datesByCode = {};
+  for (const u of db.prepare("SELECT rows_json FROM sheet_uploads WHERE type='sales'").all()) {
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      const code = String(row.code || '').trim();
+      if (!code || !row.date) continue;
+      (datesByCode[code] || (datesByCode[code] = [])).push(row.date);
+    }
+  }
+  const contacted = contacts.map(ct => {
+    const cdate = ct.contacted_at.slice(0, 10);
+    const due = addDaysIso(cdate, 7);
+    const later = (datesByCode[ct.customer_code] || []).filter(dt => dt > cdate).sort();
+    const returned = later.length > 0;
+    return { code: ct.customer_code, contactedAt: ct.contacted_at, contactedBy: ct.contacted_by,
+      followUpDue: due, returned, returnedAt: returned ? later[0] : null,
+      status: returned ? 'returned' : (todayIso >= due ? 'not_returned' : 'pending') };
+  });
+  const resolved = contacted.filter(c => c.status !== 'pending');
+  const returnedCount = resolved.filter(c => c.status === 'returned').length;
+  res.json({ month, asOf,
+    stats: { poolSize: pool.length, contacted: contacts.length, returned: returnedCount,
+      pending: contacted.filter(c => c.status === 'pending').length,
+      successRate: resolved.length ? Math.round(returnedCount / resolved.length * 100) : null },
+    top: pool.filter(p => !recent.has(p.code)).slice(0, 15),
+    contacted });
+});
+app.post('/api/recovery/contact', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const { code, month } = req.body || {};
+  if (!code) return res.status(400).json({ error: 'الكود مطلوب' });
+  const m = month || new Date().toISOString().slice(0, 7);
+  db.prepare(`INSERT INTO recovery_contacts (customer_code, month, contacted_by) VALUES (?,?,?)
+    ON CONFLICT(customer_code, month) DO UPDATE SET contacted_at=datetime('now'), contacted_by=excluded.contacted_by`)
+    .run(String(code).trim(), m, req.session.user.username || '');
+  persistDb(); res.json({ ok: true });
 });
 
 // Customer profile (name/phone/notes) — data the bills sheet does not carry.
