@@ -153,6 +153,7 @@ function migrateDb() {
     if (!ucols.includes('sheet_month')) db.exec("ALTER TABLE sheet_uploads ADD COLUMN sheet_month TEXT NOT NULL DEFAULT ''");
     const ecols = db.prepare("PRAGMA table_info(employees)").all().map(c => c.name);
     if (!ecols.includes('coding_target_pct')) db.exec("ALTER TABLE employees ADD COLUMN coding_target_pct REAL NOT NULL DEFAULT 70");
+    if (!ecols.includes('phone')) db.exec("ALTER TABLE employees ADD COLUMN phone TEXT NOT NULL DEFAULT ''");
   } catch (e) { console.error('migrate failed', e); }
 }
 
@@ -482,16 +483,16 @@ app.get('/api/employees', requireAuth, (req, res) => {
   res.json(rows.map(r => ({ ...r, custom_items: JSON.parse(r.custom_items || '[]') })));
 });
 app.post('/api/employees', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
-  const { name, username, password, monthly_sales, monthly_invoices, monthly_coding, custom_items } = req.body || {};
+  const { name, username, password, monthly_sales, monthly_invoices, monthly_coding, custom_items, phone } = req.body || {};
   if (!name || !username) return res.status(400).json({ error: 'الاسم واليوزر مطلوبان' });
   try {
     const hash = bcrypt.hashSync(String(password || '1234'), 10);
     const u = db.prepare('INSERT INTO users (username, password_hash, role, name) VALUES (?, ?, ?, ?)')
       .run(String(username).trim(), hash, 'employee', name);
-    const e = db.prepare('INSERT INTO employees (user_id, name, username, monthly_sales, monthly_invoices, monthly_coding, custom_items) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    const e = db.prepare('INSERT INTO employees (user_id, name, username, monthly_sales, monthly_invoices, monthly_coding, custom_items, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(u.lastInsertRowid, name, String(username).trim(),
         Number(monthly_sales) || 0, Number(monthly_invoices) || 0, Number(monthly_coding) || 0,
-        JSON.stringify(Array.isArray(custom_items) ? custom_items : []));
+        JSON.stringify(Array.isArray(custom_items) ? custom_items : []), String(phone || '').trim());
     audit(me(req).username, 'add_employee', `إضافة موظف ${name}`);
     res.json({ ok: true, id: e.lastInsertRowid });
   } catch (err) {
@@ -549,11 +550,11 @@ app.post('/api/employees/batch', requireRole('owner', 'manager', 'superadmin'), 
   res.json({ ok: true, added, skipped, deleted, updated });
 });
 app.put('/api/employees/:id', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
-  const { name, monthly_sales, monthly_invoices, monthly_coding, custom_items, coding_target_pct } = req.body || {};
+  const { name, monthly_sales, monthly_invoices, monthly_coding, custom_items, coding_target_pct, phone } = req.body || {};
   const pct = coding_target_pct === undefined || coding_target_pct === '' ? null : Math.min(100, Math.max(0, Number(coding_target_pct) || 0));
-  db.prepare(`UPDATE employees SET name=COALESCE(?, name), monthly_sales=COALESCE(?, monthly_sales), monthly_invoices=COALESCE(?, monthly_invoices), monthly_coding=COALESCE(?, monthly_coding), custom_items=COALESCE(?, custom_items), coding_target_pct=COALESCE(?, coding_target_pct) WHERE id=?`)
+  db.prepare(`UPDATE employees SET name=COALESCE(?, name), monthly_sales=COALESCE(?, monthly_sales), monthly_invoices=COALESCE(?, monthly_invoices), monthly_coding=COALESCE(?, monthly_coding), custom_items=COALESCE(?, custom_items), coding_target_pct=COALESCE(?, coding_target_pct), phone=COALESCE(?, phone) WHERE id=?`)
     .run(name || null, monthly_sales === undefined ? null : Number(monthly_sales) || 0, monthly_invoices === undefined ? null : Number(monthly_invoices) || 0, monthly_coding === undefined ? null : Number(monthly_coding) || 0,
-      custom_items === undefined ? null : JSON.stringify(Array.isArray(custom_items) ? custom_items : []), pct, req.params.id);
+      custom_items === undefined ? null : JSON.stringify(Array.isArray(custom_items) ? custom_items : []), pct, phone === undefined ? null : String(phone || '').trim(), req.params.id);
   audit(me(req).username, 'update_employee', `تعديل موظف ${req.params.id}`);
   res.json({ ok: true });
 });
@@ -846,6 +847,89 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
       codingCampaign: { ...codingCampaign, rows: mine ? codingCampaign.rows.filter(r => r.id === own) : [] } });
   }
   res.json({ month, settings, workingDays: wd, totals, avgInvoice, perEmployee, problems, sheets, leaderboard, codingCampaign });
+});
+
+// Feature 4 — Personal coach: weekly report per employee vs the team average
+// (ATV, coding %, Preferred, invoice count). One weakest point + 3 short
+// practical steps, encouraging language. Text is built from LOCAL templates.
+const COACH_LABELS = { atv: 'متوسط الفاتورة', coding: 'نسبة التكويد', preferred: 'الـ Preferred', invoices: 'عدد الفواتير' };
+const COACH_STEPS = {
+  atv: ['اقترح صنف إضافي مناسب مع كل روشتة (فيتامين أو عناية شخصية).', 'اعرض بديل الـ Preferred الأول قبل أي بديل تاني.', 'قبل ما تقفل الفاتورة اسأل: محتاج حاجة تانية مع العلاج؟'],
+  coding: ['قول جملة الكاشير لكل عميل: تحب أسجل رقمك علشان نبلغك بالعروض ونتابع علاجك؟', 'سجّل الرقم قبل طباعة الفاتورة مش بعدها.', 'راجع فواتيرك اللي من غير كود في آخر الوردية.'],
+  preferred: ['اعرض صنف الـ Preferred الأول في كل حالة مناسبة.', 'احفظ أول 5 أصناف Preferred في قسمك عشان تقترحهم بسرعة.', 'تابع نسبة الـ Preferred بتاعتك كل يوم من صفحتك.'],
+  invoices: ['سرّع استقبال العملاء في وقت الزحمة وجهّز الأصناف الشائعة جنبك.', 'ساعد زمايلك لما يكون عندهم زحمة عشان الفريق كله يبيع أكتر.', 'راجع مع المدير أوقات الزحمة ونسّق الورديات عليها.'],
+  none: ['حافظ على مستواك — كمل بنفس الطريقة.', 'شارك زمايلك الطريقة اللي بتجيب بيها النتايج دي.', 'حط لنفسك هدف أعلى شوية للأسبوع الجاي.'],
+};
+app.get('/api/coach/weekly', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const dateParam = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : new Date().toISOString().slice(0, 10);
+  const d = new Date(dateParam + 'T00:00:00Z');
+  const sat = new Date(d); sat.setUTCDate(sat.getUTCDate() - ((d.getUTCDay() + 1) % 7));
+  const fri = new Date(sat); fri.setUTCDate(fri.getUTCDate() + 6);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const weekStart = sat.toISOString().slice(0, 10);
+  const weekEnd = fri.toISOString().slice(0, 10) > todayIso ? todayIso : fri.toISOString().slice(0, 10);
+  // Bills rows in the week (all sales uploads, deduped by type+filename).
+  const uploads = db.prepare("SELECT * FROM sheet_uploads WHERE type='sales' ORDER BY id DESC").all();
+  const seen = new Set();
+  const byName = {};
+  for (const u of uploads) {
+    const key = `${u.type}|${u.filename}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      if (!row.date || row.date < weekStart || row.date > weekEnd) continue;
+      const name = String(row.employee || '').trim();
+      if (!name) continue;
+      const s = byName[name] || (byName[name] = { sales: 0, invoices: 0, coded: 0 });
+      const n = Number(row.invoices || 0) || 1;
+      s.sales += Number(row.sales || 0);
+      s.invoices += n;
+      if (String(row.code || '').trim()) s.coded += n;
+    }
+  }
+  // Weekly Preferred per employee: daily manual entries only
+  // (items sheets are monthly and carry no dates).
+  const prefRows = db.prepare('SELECT employee_id, SUM(preferred_value) v FROM daily_results WHERE date>=? AND date<=? GROUP BY employee_id').all(weekStart, weekEnd);
+  const prefById = Object.fromEntries(prefRows.map(r => [r.employee_id, r.v || 0]));
+  const emps = db.prepare('SELECT * FROM employees WHERE active=1 ORDER BY name').all();
+  const rows = emps.map(e => {
+    const s = byName[e.name.trim()] || { sales: 0, invoices: 0, coded: 0 };
+    const preferred = prefById[e.id] || 0;
+    return { id: e.id, name: e.name, phone: e.phone || '',
+      sales: Math.round(s.sales * 100) / 100, invoices: s.invoices,
+      atv: s.invoices ? Math.round(s.sales / s.invoices) : 0,
+      coded: s.coded, codingRate: s.invoices ? Math.round(s.coded / s.invoices * 1000) / 10 : 0,
+      preferred: Math.round(preferred * 100) / 100 };
+  });
+  const active = rows.filter(r => r.invoices > 0);
+  const totSales = active.reduce((a, r) => a + r.sales, 0);
+  const totInv = active.reduce((a, r) => a + r.invoices, 0);
+  const totCoded = active.reduce((a, r) => a + r.coded, 0);
+  const teamAvg = {
+    atv: totInv ? Math.round(totSales / totInv) : 0,
+    codingRate: totInv ? Math.round(totCoded / totInv * 1000) / 10 : 0,
+    preferred: active.length ? Math.round(active.reduce((a, r) => a + r.preferred, 0) / active.length * 100) / 100 : 0,
+    invoices: active.length ? Math.round(totInv / active.length * 10) / 10 : 0,
+  };
+  for (const r of rows) {
+    if (!r.invoices) { r.hasData = false; r.weakness = null; r.steps = []; continue; }
+    r.hasData = true;
+    const ratios = [];
+    if (teamAvg.atv > 0) ratios.push(['atv', r.atv / teamAvg.atv]);
+    if (teamAvg.codingRate > 0) ratios.push(['coding', r.codingRate / teamAvg.codingRate]);
+    if (teamAvg.preferred > 0) ratios.push(['preferred', r.preferred / teamAvg.preferred]);
+    if (teamAvg.invoices > 0) ratios.push(['invoices', r.invoices / teamAvg.invoices]);
+    ratios.sort((a, b) => a[1] - b[1]);
+    const worst = ratios[0];
+    if (worst && worst[1] < 0.95) {
+      r.weakness = { key: worst[0], label: COACH_LABELS[worst[0]], ratio: Math.round(worst[1] * 100) / 100 };
+      r.steps = COACH_STEPS[worst[0]];
+    } else {
+      r.weakness = null;
+      r.steps = COACH_STEPS.none;
+    }
+  }
+  res.json({ weekStart, weekEnd, teamAvg, employees: rows });
 });
 
 // Smart Performance Coach
