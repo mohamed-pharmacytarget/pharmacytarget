@@ -17,6 +17,8 @@ let settings = {};
 let month = thisMonth();
 let selectedEmployeeId = null;
 let tab = 'dashboard';
+let coachDate = today();
+let coachEmpId = 0;
 
 // ---------- Login ----------
 $('#login-form').addEventListener('submit', async (e) => {
@@ -48,7 +50,7 @@ async function loadAll() {
 function renderTabs() {
   const tabs = [['dashboard', 'لوحة التحكم']];
   if (['owner', 'manager', 'superadmin'].includes(user.role)) {
-    tabs.push(['employees', 'إدارة الموظفين'], ['reports', 'تقارير'], ['preferred', 'Preferred List'], ['uploads', 'رفع تقارير أكسيل'], ['customers', 'العملاء'], ['recovery', 'استرجاع العملاء'], ['early-warning', 'تنبيه مبكر']);
+    tabs.push(['employees', 'إدارة الموظفين'], ['reports', 'تقارير'], ['preferred', 'Preferred List'], ['uploads', 'رفع تقارير أكسيل'], ['customers', 'العملاء'], ['recovery', 'استرجاع العملاء'], ['early-warning', 'تنبيه مبكر'], ['coach', 'الكوتش الشخصي']);
   }
   if (user.role === 'employee') tabs.push(['myday', 'تسجيل نتائج اليوم']);
   if (user.role === 'superadmin') {
@@ -73,6 +75,7 @@ async function render() {
   if (tab === 'customers') return renderCustomers(v);
   if (tab === 'recovery') return renderRecovery(v);
   if (tab === 'early-warning') return renderEarlyWarning(v);
+  if (tab === 'coach') return renderCoach(v);
 }
 
 // ---------- Dashboard ----------
@@ -242,6 +245,7 @@ function renderEmployees(v) {
       <label>الاسم <input id="f-name" required></label>
       <label>اسم المستخدم <input id="f-user" required></label>
       <label>كلمة المرور <input id="f-pass" type="password" required></label>
+      <label>رقم الواتساب <input id="f-phone" placeholder="01xxxxxxxxx"></label>
       <label>تارجت المبيعات الشهري <input id="f-sales" type="number" value="0"></label>
       <label>تارجت عدد الفواتير الشهري <input id="f-inv" type="number" value="0"></label>
       <label>تارجت التكويد الشهري <input id="f-cod" type="number" value="0"></label>
@@ -266,7 +270,7 @@ function renderEmployees(v) {
   $('#add-emp').addEventListener('submit', async (e) => {
     e.preventDefault();
     try {
-      await api('/api/employees', { method: 'POST', body: JSON.stringify({ name: $('#f-name').value, username: $('#f-user').value, password: $('#f-pass').value, monthly_sales: $('#f-sales').value, monthly_invoices: $('#f-inv').value, monthly_coding: $('#f-cod').value, custom_items: items }) });
+      await api('/api/employees', { method: 'POST', body: JSON.stringify({ name: $('#f-name').value, username: $('#f-user').value, password: $('#f-pass').value, phone: $('#f-phone').value, monthly_sales: $('#f-sales').value, monthly_invoices: $('#f-inv').value, monthly_coding: $('#f-cod').value, custom_items: items }) });
       $('#emp-msg').textContent = 'تمت إضافة الموظف';
       await loadAll(); renderEmployees(v);
     } catch (err) { $('#emp-msg').textContent = err.message; }
@@ -285,6 +289,7 @@ function renderEmployees(v) {
     box.innerHTML = `<h3>تعديل ${e.name}</h3>
       <form id="edit-form">
         <label>الاسم <input id="e-name" value="${e.name}" required></label>
+        <label>رقم الواتساب <input id="e-phone" value="${e.phone || ''}" placeholder="01xxxxxxxxx"></label>
         <label>تارجت المبيعات الشهري <input id="e-sales" type="number" value="${e.monthly_sales}"></label>
         <label>تارجت عدد الفواتير الشهري <input id="e-inv" type="number" value="${e.monthly_invoices}"></label>
         <label>تارجت التكويد الشهري <input id="e-cod" type="number" value="${e.monthly_coding}"></label>
@@ -303,7 +308,7 @@ function renderEmployees(v) {
     renderEditItems();
     $('#edit-form').addEventListener('submit', async (ev) => {
       ev.preventDefault();
-      await api(`/api/employees/${e.id}`, { method: 'PUT', body: JSON.stringify({ name: $('#e-name').value, monthly_sales: $('#e-sales').value, monthly_invoices: $('#e-inv').value, monthly_coding: $('#e-cod').value, coding_target_pct: $('#e-codpct').value, custom_items: items }) });
+      await api(`/api/employees/${e.id}`, { method: 'PUT', body: JSON.stringify({ name: $('#e-name').value, phone: $('#e-phone').value, monthly_sales: $('#e-sales').value, monthly_invoices: $('#e-inv').value, monthly_coding: $('#e-cod').value, coding_target_pct: $('#e-codpct').value, custom_items: items }) });
       $('#edit-msg').textContent = 'تم الحفظ';
       await loadAll(); renderEmployees(v);
     });
@@ -635,6 +640,56 @@ async function renderEarlyWarning(v) {
   </table>` : '<p>مفيش عملاء متأخرين عن معادهم في الشهر ده 🎉 — أو ارفع شيت فواتير الشهر لو لسه مرفعتوش.</p>'}
   </div>`;
   $('#ew-month').addEventListener('change', (e) => { month = e.target.value; render(); });
+}
+
+function coachReportText(r, teamAvg, weekStart, weekEnd) {
+  const lines = [
+    `تقرير الأسبوع (${weekStart} → ${weekEnd}) — ${r.name} 👏`,
+    `مبيعاتك: ${fmt(r.sales)} جنيه | فواتيرك: ${fmt(r.invoices)} | متوسط فاتورتك: ${fmt(r.atv)} جنيه (متوسط الفريق: ${fmt(teamAvg.atv)})`,
+    `نسبة الفواتير بكود: ${r.codingRate}% (متوسط الفريق: ${teamAvg.codingRate}%)`,
+    `Preferred: ${fmt(r.preferred)} جنيه (متوسط الفريق: ${fmt(teamAvg.preferred)})`,
+  ];
+  if (r.weakness) lines.push(`🎯 نقطة تركيزك الأسبوع ده: ${r.weakness.label} أقل من متوسط الفريق.`, 'خطوات عملية:', ...r.steps.map((s, i) => `${i + 1}. ${s}`));
+  else lines.push('🎯 مفيش نقطة ضعف واضحة الأسبوع ده — مستواك فوق متوسط الفريق، كمل كده 👏', 'خطوات:', ...r.steps.map((s, i) => `${i + 1}. ${s}`));
+  lines.push('إنت قدها 💪 — إدارة الصيدلية');
+  return lines.join('\n');
+}
+async function renderCoach(v) {
+  const data = await api(`/api/coach/weekly?date=${coachDate}`);
+  const teamAvg = data.teamAvg;
+  if (!coachEmpId || !data.employees.some(e => e.id === coachEmpId)) coachEmpId = data.employees.length ? data.employees[0].id : 0;
+  const r = data.employees.find(e => e.id === coachEmpId);
+  const txt = r ? coachReportText(r, teamAvg, data.weekStart, data.weekEnd) : '';
+  const wa = r && r.phone ? waPhone(r.phone) : '';
+  v.innerHTML = `<div class="card"><h2>🎯 الكوتش الشخصي — الأسبوع ${data.weekStart} → ${data.weekEnd}</h2>
+  <label>أي يوم في الأسبوع <input type="date" id="coach-date" value="${coachDate}"></label>
+  <button class="secondary" id="coach-prev">← الأسبوع اللي فات</button> <button class="secondary" id="coach-next">الأسبوع الجاي →</button>
+  <p class="muted">المقارنة مع متوسط الفريق في الأسبوع ده: متوسط الفاتورة ${fmt(teamAvg.atv)} جنيه — نسبة التكويد ${teamAvg.codingRate}% — Preferred ${fmt(teamAvg.preferred)} جنيه — الفواتير ${teamAvg.invoices}. الـ Preferred هنا من التسجيل اليومي بس.</p>
+  <h3>نظرة سريعة على الفريق</h3>
+  <table><tr><th>الموظف</th><th>الفواتير</th><th>متوسط الفاتورة</th><th>التكويد</th><th>Preferred</th><th>أضعف نقطة</th><th></th></tr>
+  ${data.employees.map(e => `<tr><td>${e.name}</td><td>${e.invoices ? fmt(e.invoices) : '—'}</td><td>${e.invoices ? fmt(e.atv) + ' ج' : '—'}</td><td>${e.invoices ? e.codingRate + '%' : '—'}</td><td>${e.invoices ? fmt(e.preferred) + ' ج' : '—'}</td><td>${!e.hasData ? 'مفيش بيانات' : e.weakness ? e.weakness.label : '✅ ممتاز'}</td><td><button class="secondary" data-coach="${e.id}">عرض التقرير</button></td></tr>`).join('')}
+  </table>
+  ${r ? `<h3>تقرير ${r.name} — الأسبوع ${data.weekStart} → ${data.weekEnd}</h3>
+  <div class="card" id="coach-report">
+  <table><tr><th>المقياس</th><th>إنت</th><th>متوسط الفريق</th></tr>
+  <tr><td>متوسط الفاتورة</td><td><b>${fmt(r.atv)} ج</b></td><td>${fmt(teamAvg.atv)} ج</td></tr>
+  <tr><td>نسبة الفواتير بكود</td><td><b>${r.codingRate}%</b></td><td>${teamAvg.codingRate}%</td></tr>
+  <tr><td>الـ Preferred</td><td><b>${fmt(r.preferred)} ج</b></td><td>${fmt(teamAvg.preferred)} ج</td></tr>
+  <tr><td>عدد الفواتير</td><td><b>${fmt(r.invoices)}</b></td><td>${teamAvg.invoices}</td></tr>
+  <tr><td>المبيعات</td><td><b>${fmt(r.sales)} ج</b></td><td>—</td></tr>
+  </table>
+  ${r.hasData ? (r.weakness ? `<div class="problem"><b>🎯 أضعف نقطة: ${r.weakness.label}</b> — أقل من متوسط الفريق. دي النقطة اللي لو ركزت فيها هتفرق معاك أكتر حاجة الأسبوع ده.</div>` : `<div class="good"><b>🎯 مفيش نقطة ضعف واضحة الأسبوع ده</b> — مستواك فوق متوسط الفريق في كل المقاييس، كمل كده 👏</div>`) : '<div class="problem"><b>مفيش فواتير مسجلة للموظف ده في الأسبوع ده.</b></div>'}
+  ${r.hasData ? `<h3>3 خطوات عملية</h3><ol>${r.steps.map(s => `<li>${s}</li>`).join('')}</ol>` : ''}
+  </div>
+  ${wa ? `<a href="https://wa.me/${wa}?text=${encodeURIComponent(txt)}" target="_blank"><button>📱 إرسال للموظف واتساب</button></a>` : '<p class="muted">مفيش رقم تليفون للموظف — سجّله من إدارة الموظفين، أو انسخ التقرير وابعتُه بنفسك.</p>'}
+  <button class="secondary" id="coach-copy">📋 نسخ التقرير</button> <button class="secondary" id="coach-print">🖨️ طباعة</button>` : '<p>لا يوجد موظفون.</p>'}
+  </div>`;
+  $('#coach-date').addEventListener('change', (e) => { coachDate = e.target.value; render(); });
+  $('#coach-prev').addEventListener('click', () => { const d = new Date(coachDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 7); coachDate = d.toISOString().slice(0, 10); render(); });
+  $('#coach-next').addEventListener('click', () => { const d = new Date(coachDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 7); coachDate = d.toISOString().slice(0, 10); render(); });
+  v.querySelectorAll('[data-coach]').forEach(b => b.addEventListener('click', () => { coachEmpId = Number(b.dataset.coach); render(); }));
+  const cp = $('#coach-copy'); if (cp) cp.addEventListener('click', async () => { try { await navigator.clipboard.writeText(txt); cp.textContent = 'تم النسخ ✓'; } catch (e) { cp.textContent = 'النسخ مش متاح'; } });
+  const pr = $('#coach-print'); if (pr) pr.addEventListener('click', () => window.print());
 }
 
 // ---------- Uploads ----------
