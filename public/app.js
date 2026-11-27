@@ -110,6 +110,12 @@ async function renderDashboard(v) {
     <table><tr><th>الموظف</th><th>المبيعات</th><th>الفواتير</th><th>التكويد</th><th>المؤشر</th><th>التصنيف</th></tr>
     ${rep.perEmployee.map(e => `<tr><td>${e.name}</td><td>${fmt(e.achieved.sales)} / ${fmt(e.target.sales)}</td><td>${fmt(e.achieved.invoices)} / ${fmt(e.target.invoices)}</td><td>${e.achieved.codingRate || 0}%</td><td>${e.index}%</td><td><span class="badge">${e.classification}</span></td></tr>`).join('')}
     </table>
+    ${rep.codingCampaign ? `<h3>📋 حملة التكويد — بدون كود → مكوّد</h3>
+    <p class="muted">نسبة الفواتير اللي طلعت بكود عميل — اليوم (${rep.codingCampaign.todayDate}) والأسبوع ده (${rep.codingCampaign.weekStart} → ${rep.codingCampaign.weekEnd}). التارجت الافتراضي 70% ويتعدل لكل موظف من هنا أو من إدارة الموظفين. متوسط الفرع: اليوم ${rep.codingCampaign.branchTodayRate}% — الأسبوع ${rep.codingCampaign.branchWeekRate}%.</p>
+    <div class="card" style="background:#fff8e1"><b>🗣️ اللي الموظف يقوله على الكاشير:</b><br>«تحب أسجل رقمك علشان نبلغك بالعروض ونتابع علاجك؟»</div>
+    <table><tr><th>الموظف</th><th>تكويد اليوم</th><th>تكويد الأسبوع</th><th>تكويد الشهر</th><th>التارجت %</th><th>الحالة</th></tr>
+    ${rep.codingCampaign.rows.map(r => `<tr><td>${r.name}</td><td>${r.todayTotal ? r.todayRate + '% (' + r.todayCoded + '/' + r.todayTotal + ')' : '—'}</td><td>${r.weekTotal ? r.weekRate + '% (' + r.weekCoded + '/' + r.weekTotal + ')' : '—'}</td><td>${r.monthRate}%</td><td><input type="number" min="0" max="100" value="${r.target}" data-codpct="${r.id}" style="width:64px">% <button class="secondary" data-save-codpct="${r.id}">حفظ</button></td><td>${r.weekTotal ? (r.weekRate >= r.target ? '✅ على التارجت' : '⚠️ تحت التارجت') : '—'}</td></tr>`).join('')}
+    </table>` : ''}
     <h3>🏆 لوحة الصدارة — ${month}</h3>
     ${rep.leaderboard && rep.leaderboard.some(r => r.achieved.sales > 0 || r.achieved.invoices > 0) ? `
     <p>الترتيب حسب ${rep.leaderboard[0].rankBy === 'sales' ? 'المبيعات الفعلية (الشهر ده خلص، والتارجت كان متوقع منه)' : 'نسبة تحقيق التارجت'}. ${(() => { const imp = [...rep.leaderboard].filter(r => r.improved !== null && r.improved !== undefined).sort((a, b) => b.improved - a.improved)[0]; return imp ? `الأكثر تحسنًا عن الشهر اللي فات: <b>${imp.name} (${imp.improved > 0 ? '+' : ''}${imp.improved}%)</b>` : ''; })()}</p>
@@ -132,6 +138,13 @@ async function renderDashboard(v) {
     $('#settings-msg').textContent = 'تم الحفظ';
     await loadAll(); render();
   });
+  v.querySelectorAll('[data-save-codpct]').forEach(b => b.addEventListener('click', async () => {
+    const id = Number(b.dataset.saveCodpct);
+    const val = v.querySelector(`[data-codpct="${id}"]`).value;
+    await api(`/api/employees/${id}`, { method: 'PUT', body: JSON.stringify({ coding_target_pct: val }) });
+    b.textContent = 'تم ✓';
+    await loadAll(); render();
+  }));
 }
 
 async function renderEmployeeStats(el, empId) {
@@ -173,6 +186,7 @@ async function renderEmployeeStats(el, empId) {
     <p>التكويد: ${fmt(dayCod)} / ${fmt(e.dailyRequired.coding)} — ${ok(dayCod, e.dailyRequired.coding)}</p>
     <p><b>مطلوب الغد:</b> مبيعات ${fmt(e.tomorrow.sales)} جنيه (وباقي البنود بنفس طريقة الحساب من المتبقي الشهري ÷ الأيام المتبقية).</p>`; })()}
     <div class="card"><b>التكويد:</b> تارجتك ${fmt(e.target.coding)} من الـ 1,000 — حققت ${fmt(e.achieved.coded || 0)} فاتورة بكود (${e.achieved.codingRate || 0}% من فواتيرك)${e.achieved.codingRateTarget ? ` — تارجت النسبة الشهر الجاي: ${e.achieved.codingRateTarget}%` : ''}</div>
+    ${(() => { const c = rep.codingCampaign && rep.codingCampaign.rows.find(r => r.id === empId); return c ? `<div class="card"><b>📋 حملة التكويد:</b> تكويد اليوم (${rep.codingCampaign.todayDate}): ${c.todayTotal ? c.todayRate + '% (' + c.todayCoded + ' من ' + c.todayTotal + ')' : 'لسه مفيش فواتير النهاردة'} — تكويد الأسبوع: ${c.weekTotal ? c.weekRate + '% (' + c.weekCoded + ' من ' + c.weekTotal + ')' : '—'} — تارجتك: ${c.target}% ${c.weekTotal ? (c.weekRate >= c.target ? '✅' : '⚠️') : ''}<br><b>🗣️ على الكاشير قول:</b> «تحب أسجل رقمك علشان نبلغك بالعروض ونتابع علاجك؟»</div>` : ''; })()}
     ${e.custom_items.length ? `<h3>بنود خاصة بي</h3><ul>${e.custom_items.map(i => `<li>${i.name} — تارجت ${fmt(i.target)}</li>`).join('')}</ul>` : ''}
     <div id="emp-plan"></div>`;
   try {
@@ -274,6 +288,7 @@ function renderEmployees(v) {
         <label>تارجت المبيعات الشهري <input id="e-sales" type="number" value="${e.monthly_sales}"></label>
         <label>تارجت عدد الفواتير الشهري <input id="e-inv" type="number" value="${e.monthly_invoices}"></label>
         <label>تارجت التكويد الشهري <input id="e-cod" type="number" value="${e.monthly_coding}"></label>
+        <label>تارجت نسبة التكويد % <input id="e-codpct" type="number" min="0" max="100" value="${e.coding_target_pct ?? 70}"></label>
         <h3>بنود خاصة بالموظف</h3>
         <div id="edit-items"></div>
         <button type="button" id="e-add-item" class="secondary">+ إضافة item</button>
@@ -288,7 +303,7 @@ function renderEmployees(v) {
     renderEditItems();
     $('#edit-form').addEventListener('submit', async (ev) => {
       ev.preventDefault();
-      await api(`/api/employees/${e.id}`, { method: 'PUT', body: JSON.stringify({ name: $('#e-name').value, monthly_sales: $('#e-sales').value, monthly_invoices: $('#e-inv').value, monthly_coding: $('#e-cod').value, custom_items: items }) });
+      await api(`/api/employees/${e.id}`, { method: 'PUT', body: JSON.stringify({ name: $('#e-name').value, monthly_sales: $('#e-sales').value, monthly_invoices: $('#e-inv').value, monthly_coding: $('#e-cod').value, coding_target_pct: $('#e-codpct').value, custom_items: items }) });
       $('#edit-msg').textContent = 'تم الحفظ';
       await loadAll(); renderEmployees(v);
     });
