@@ -1292,6 +1292,42 @@ app.post('/api/recovery/contact', requireRole('owner', 'manager', 'superadmin'),
   persistDb(); res.json({ ok: true });
 });
 
+// Feature 2 — Early warning: a regular customer whose absence passed 1.5× their
+// usual visit gap. This list feeds the daily recovery call list automatically:
+// recoveryPool already boosts these customers to churn probability >= 0.9.
+function earlyWarningList(month) {
+  const d = computeCustomerData(month);
+  const { daysInMonth } = monthRange(month);
+  const asOf = `${month}-${String(daysInMonth).padStart(2, '0')}`;
+  if (!d.totals.totalInvoices) return { list: [], asOf };
+  const asOfMs = new Date(asOf + 'T00:00:00Z').getTime();
+  const generic = c => c.code === '0' || c.code === '1' || c.code === '444';
+  const list = [];
+  for (const c of d.customers) {
+    if (generic(c)) continue;
+    const gap = avgGapOf(c);
+    if (!gap || !c.lastDate) continue;
+    const daysSince = Math.floor((asOfMs - new Date(c.lastDate + 'T00:00:00Z').getTime()) / DAY_MS);
+    if (daysSince <= 1.5 * gap) continue;
+    list.push({ code: c.code, name: c.name || '', phone: c.phone || '',
+      lastDate: c.lastDate, avgGap: gap, daysSince,
+      ratio: Math.round(daysSince / gap * 10) / 10,
+      overdueDays: daysSince - gap,
+      expectedReturn: addDaysIso(c.lastDate, gap),
+      invoices: c.invoices, sales: Math.round(c.sales * 100) / 100,
+      avgPurchase: c.invoices ? Math.round(c.sales / c.invoices) : 0 });
+  }
+  list.sort((a, b) => b.ratio - a.ratio || b.sales - a.sales);
+  return { list, asOf };
+}
+app.get('/api/early-warning', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const { list, asOf } = earlyWarningList(month);
+  const salesAtRisk = Math.round(list.reduce((s, c) => s + c.sales, 0) * 100) / 100;
+  const avgRatio = list.length ? Math.round(list.reduce((s, c) => s + c.ratio, 0) / list.length * 10) / 10 : null;
+  res.json({ month, asOf, stats: { count: list.length, salesAtRisk, avgRatio }, list });
+});
+
 // Customer profile (name/phone/notes) — data the bills sheet does not carry.
 app.post('/api/customers/profile', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
   const { code, name, phone, notes } = req.body || {};
