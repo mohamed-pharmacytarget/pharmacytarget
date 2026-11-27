@@ -48,7 +48,7 @@ async function loadAll() {
 function renderTabs() {
   const tabs = [['dashboard', 'لوحة التحكم']];
   if (['owner', 'manager', 'superadmin'].includes(user.role)) {
-    tabs.push(['employees', 'إدارة الموظفين'], ['reports', 'تقارير'], ['preferred', 'Preferred List'], ['uploads', 'رفع تقارير أكسيل'], ['customers', 'العملاء'], ['recovery', 'استرجاع العملاء']);
+    tabs.push(['employees', 'إدارة الموظفين'], ['reports', 'تقارير'], ['preferred', 'Preferred List'], ['uploads', 'رفع تقارير أكسيل'], ['customers', 'العملاء'], ['recovery', 'استرجاع العملاء'], ['early-warning', 'تنبيه مبكر']);
   }
   if (user.role === 'employee') tabs.push(['myday', 'تسجيل نتائج اليوم']);
   if (user.role === 'superadmin') {
@@ -72,6 +72,7 @@ async function render() {
   if (tab === 'catalog') return renderCatalog(v);
   if (tab === 'customers') return renderCustomers(v);
   if (tab === 'recovery') return renderRecovery(v);
+  if (tab === 'early-warning') return renderEarlyWarning(v);
 }
 
 // ---------- Dashboard ----------
@@ -601,6 +602,24 @@ async function renderRecovery(v) {
     await api('/api/recovery/contact', { method: 'POST', body: JSON.stringify({ code: b.dataset.contact, month }) });
     render();
   }));
+}
+
+async function renderEarlyWarning(v) {
+  const data = await api(`/api/early-warning?month=${month}`);
+  const st = data.stats;
+  v.innerHTML = `<div class="card"><h2>⚠️ تنبيه مبكر — ${month}</h2>
+  <label>الشهر <input type="month" id="ew-month" value="${month}"></label>
+  <div class="grid">
+    <div class="stat">عملاء متأخرين عن معادهم<b>${fmt(st.count)}</b></div>
+    <div class="stat">مبيعاتهم المعرضة للخطر<b>${fmt(st.salesAtRisk)} ج</b></div>
+    <div class="stat">متوسط التأخير<b>${st.avgRatio === null ? '—' : st.avgRatio + '× المعتاد'}</b></div>
+  </div>
+  <p class="muted">القاعدة: العميل اللي بييجي كل X يوم وغاب أكتر من 1.5× المدة دي — مثال: بييجي كل 14 يوم وغاب 25 يوم. القايمة دي بتغذي قايمة الاتصال اليومية في «استرجاع العملاء» تلقائيًا: اللي هنا بياخد أولوية أعلى هناك. التواصل بيتم من تبويب استرجاع العملاء.</p>
+  ${data.list.length ? `<table><tr><th>#</th><th>الكود</th><th>الاسم</th><th>آخر زيارة</th><th>بييجي كل</th><th>غايب من</th><th>التأخير</th><th>المتوقع يرجع</th><th>متوسط الفاتورة</th><th>مبيعاته</th></tr>
+  ${data.list.map((c, i) => `<tr><td>${i + 1}</td><td>${c.code}</td><td>${c.name || '—'}</td><td>${c.lastDate}</td><td>${c.avgGap} يوم</td><td>${c.daysSince} يوم</td><td><b>${c.ratio}×</b><br><span class="small muted">متأخر ${c.overdueDays} يوم</span></td><td>${c.expectedReturn}</td><td>${fmt(c.avgPurchase)} ج</td><td>${fmt(c.sales)} ج</td></tr>`).join('')}
+  </table>` : '<p>مفيش عملاء متأخرين عن معادهم في الشهر ده 🎉 — أو ارفع شيت فواتير الشهر لو لسه مرفعتوش.</p>'}
+  </div>`;
+  $('#ew-month').addEventListener('change', (e) => { month = e.target.value; render(); });
 }
 
 // ---------- Uploads ----------
