@@ -48,7 +48,7 @@ async function loadAll() {
 function renderTabs() {
   const tabs = [['dashboard', 'لوحة التحكم']];
   if (['owner', 'manager', 'superadmin'].includes(user.role)) {
-    tabs.push(['employees', 'إدارة الموظفين'], ['reports', 'تقارير'], ['preferred', 'Preferred List'], ['uploads', 'رفع تقارير أكسيل'], ['customers', 'العملاء']);
+    tabs.push(['employees', 'إدارة الموظفين'], ['reports', 'تقارير'], ['preferred', 'Preferred List'], ['uploads', 'رفع تقارير أكسيل'], ['customers', 'العملاء'], ['recovery', 'استرجاع العملاء']);
   }
   if (user.role === 'employee') tabs.push(['myday', 'تسجيل نتائج اليوم']);
   if (user.role === 'superadmin') {
@@ -71,6 +71,7 @@ async function render() {
   if (tab === 'mohamed') return renderMohamed(v);
   if (tab === 'catalog') return renderCatalog(v);
   if (tab === 'customers') return renderCustomers(v);
+  if (tab === 'recovery') return renderRecovery(v);
 }
 
 // ---------- Dashboard ----------
@@ -527,6 +528,79 @@ async function renderCustomers(v) {
     });
   };
   draw();
+}
+
+// ---------- Recovery engine (Feature 1) ----------
+// WhatsApp templates are LOCAL ONLY: no customer name or phone ever leaves the app
+// for any external service — the message is filled in here, in the browser.
+const RECOVERY_SEG = { vip: '👑 VIP معرّض للفقد', atrisk: '⚠️ معرّض للفقد', inactive: '😴 غير نشط', onetime: '1️⃣ مرة واحدة' };
+const RECOVERY_MSGS = {
+  vip: [
+    'أهلاً {name} 🌸 وحشتنا! حضرتك من عملائنا المميزين وبقالك فترة مجتش، لو محتاج أي حاجة من علاجك أو استشارة إحنا موجودين في أي وقت 💊',
+    'مساء الخير يا {name} ✨ بنتطمن عليك، بقالنا فترة مشفناكش في الصيدلية، لو علاجك قرب يخلص أو محتاج حاجة ابعتلنا وإحنا نجهزها لك 💊',
+    'أهلاً بيك يا {name} 💛 إحنا بنتابع مع عملائنا المميزين، لو فيه أي دواء محتاجه أو استفسار عن علاجك إحنا في خدمتك دايماً 💊',
+  ],
+  atrisk: [
+    'أهلاً {name} 🌸 وحشتنا في الصيدلية! بقالك فترة مجتش، لو محتاج أي حاجة من علاجك إحنا موجودين 💊',
+    'مساء الخير يا {name} ✨ بنتطمن عليك، لو علاجك قرب يخلص ابعتلنا وإحنا نجهزه لك قبل ما تيجي 💊',
+    'أهلاً بيك يا {name} 💛 لو فيه أي استفسار عن دواء أو علاج بتاخده، فريق الصيدلية في خدمتك في أي وقت 💊',
+  ],
+  inactive: [
+    'أهلاً {name} 🌸 بقالنا فترة مشفناكش، بنتطمن عليك — لو محتاج أي حاجة إحنا موجودين 💊',
+    'مساء الخير يا {name} ✨ لو فيه دواء بتاخده بانتظام وقرب يخلص، ابعتلنا وإحنا نجهزه لك 💊',
+    'أهلاً بيك يا {name} 💛 الصيدلية في خدمتك في أي وقت، ولو محتاج توصيل أو استفسار ابعتلنا 💊',
+  ],
+  onetime: [
+    'أهلاً {name} 🌸 شرفتنا بزيارتك للصيدلية، وحابين نتطمن عليك — لو محتاج أي حاجة من علاجك إحنا موجودين 💊',
+    'مساء الخير يا {name} ✨ دي أول مرة تزورنا من فترة، لو فيه أي استفسار عن الدواء إحنا في خدمتك 💊',
+    'أهلاً بيك يا {name} 💛 نتمنى تكون بخير، ولو احتجت أي حاجة من الصيدلية ابعتلنا في أي وقت 💊',
+  ],
+};
+function waPhone(p) {
+  const d = String(p || '').replace(/\D/g, '');
+  if (!d) return '';
+  if (d.length === 11 && d.startsWith('01')) return '2' + d;
+  if (d.length === 12 && d.startsWith('20')) return d;
+  if (d.length === 10 && d.startsWith('1')) return '20' + d;
+  return d;
+}
+function recoveryMsg(c) {
+  const list = RECOVERY_MSGS[c.segment] || RECOVERY_MSGS.inactive;
+  const name = (c.name || '').trim() || 'حضرتك';
+  let h = 0;
+  const key = c.code + today();
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return list[h % list.length].replaceAll('{name}', name);
+}
+async function renderRecovery(v) {
+  const data = await api(`/api/recovery?month=${month}`);
+  const st = data.stats;
+  v.innerHTML = `<div class="card"><h2>استرجاع العملاء — ${month}</h2>
+  <label>الشهر <input type="month" id="rec-month" value="${month}"></label>
+  <div class="grid">
+    <div class="stat">عملاء يستاهلوا اتصال<b>${fmt(st.poolSize)}</b></div>
+    <div class="stat">تم التواصل معهم<b>${fmt(st.contacted)}</b></div>
+    <div class="stat">رجعوا<b>${fmt(st.returned)}</b></div>
+    <div class="stat">قيد المتابعة<b>${fmt(st.pending)}</b></div>
+    <div class="stat">نسبة نجاح الحملة<b>${st.successRate === null ? '—' : st.successRate + '%'}</b>${st.successRate === null ? 'لسه مفيش متابعات خلصت' : ''}</div>
+  </div>
+  <p class="muted">القايمة مرتبة بنقاط أولوية = قيمة العميل × احتمال الفقد. العميل اللي اتصلت بيه بيختفي من القايمة 7 أيام، وبعدها بنشوف رجع ولا لأ. الرسايل قوالب محلية — مفيش أي بيانات عملاء بتتبعت لأي خدمة خارجية. أرقام التليفون بتتسجل من لوحة العملاء.</p>
+  ${data.top.length ? `<table><tr><th>#</th><th>الكود</th><th>الاسم</th><th>الشريحة</th><th>آخر زيارة</th><th>من كام يوم</th><th>متوسط مشترياته</th><th>نقاط الأولوية</th><th>رسالة واتساب</th><th></th></tr>
+  ${data.top.map((c, i) => { const msg = recoveryMsg(c); const wa = waPhone(c.phone); return `<tr><td>${i + 1}</td><td>${c.code}</td><td>${c.name || '—'}</td><td>${RECOVERY_SEG[c.segment] || c.segment}</td><td>${c.lastDate || '—'}</td><td>${c.daysSince === null ? '—' : c.daysSince + ' يوم'}</td><td>${fmt(c.avgPurchase)} ج</td><td><b>${fmt(c.score)}</b><br><span class="small muted">احتمال فقد ${c.churnPct}%</span></td><td style="min-width:220px"><div class="small">${msg}</div>${wa ? `<a href="https://wa.me/${wa}?text=${encodeURIComponent(msg)}" target="_blank"><button>افتح واتساب</button></a>` : '<p class="muted small">مفيش رقم تليفون — سجّله من لوحة العملاء</p>'} <button class="secondary" data-copy="${i}">نسخ</button></td><td><button data-contact="${c.code}">تم التواصل</button></td></tr>`; }).join('')}
+  </table>` : '<p>مفيش عملاء يستاهلوا اتصال في الشهر ده — ارفع شيت فواتير الشهر.</p>'}
+  <h3>📞 المتابعات — بعد 7 أيام بنعرف رجع ولا لأ</h3>
+  ${data.contacted.length ? `<table><tr><th>الكود</th><th>تاريخ التواصل</th><th>المتابعة بعد</th><th>الحالة</th></tr>
+  ${data.contacted.map(c => `<tr><td>${c.code}</td><td>${c.contactedAt.slice(0, 10)}</td><td>${c.followUpDue}</td><td>${c.status === 'returned' ? '✅ رجع ' + (c.returnedAt || '') : c.status === 'not_returned' ? '❌ ما رجعش' : '⏳ بانتظار المتابعة'}</td></tr>`).join('')}</table>` : '<p class="muted">لسه مفيش تواصل مسجل الشهر ده.</p>'}
+  </div>`;
+  $('#rec-month').addEventListener('change', (e) => { month = e.target.value; render(); });
+  v.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async () => {
+    const c = data.top[Number(b.dataset.copy)];
+    try { await navigator.clipboard.writeText(recoveryMsg(c)); b.textContent = 'تم النسخ ✓'; } catch (e) { b.textContent = 'النسخ مش متاح'; }
+  }));
+  v.querySelectorAll('[data-contact]').forEach(b => b.addEventListener('click', async () => {
+    await api('/api/recovery/contact', { method: 'POST', body: JSON.stringify({ code: b.dataset.contact, month }) });
+    render();
+  }));
 }
 
 // ---------- Uploads ----------
