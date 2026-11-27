@@ -45,3 +45,9 @@ th{background:#f2f4f7}
 @media(max-width:900px){.cal-grid{grid-template-columns:repeat(3,1fr)}.cal-head{display:none}}
 @media(max-width:560px){.cal-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:380px){.cal-grid{grid-template-columns:1fr}}
+@media print {
+  body { background: #fff; }
+  .verse, #tabs, .topbar, button { display: none !important; }
+  main { padding: 0; max-width: none; }
+  .card { box-shadow: none; border: 1px solid #ddd; }
+}
