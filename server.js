@@ -151,6 +151,8 @@ function migrateDb() {
     if (!cols.includes('category')) db.exec("ALTER TABLE preferred_items ADD COLUMN category TEXT NOT NULL DEFAULT ''");
     const ucols = db.prepare("PRAGMA table_info(sheet_uploads)").all().map(c => c.name);
     if (!ucols.includes('sheet_month')) db.exec("ALTER TABLE sheet_uploads ADD COLUMN sheet_month TEXT NOT NULL DEFAULT ''");
+    const ecols = db.prepare("PRAGMA table_info(employees)").all().map(c => c.name);
+    if (!ecols.includes('coding_target_pct')) db.exec("ALTER TABLE employees ADD COLUMN coding_target_pct REAL NOT NULL DEFAULT 70");
   } catch (e) { console.error('migrate failed', e); }
 }
 
@@ -547,10 +549,11 @@ app.post('/api/employees/batch', requireRole('owner', 'manager', 'superadmin'), 
   res.json({ ok: true, added, skipped, deleted, updated });
 });
 app.put('/api/employees/:id', requireRole('owner', 'manager', 'superadmin'), (req, res) => {
-  const { name, monthly_sales, monthly_invoices, monthly_coding, custom_items } = req.body || {};
-  db.prepare('UPDATE employees SET name=?, monthly_sales=?, monthly_invoices=?, monthly_coding=?, custom_items=? WHERE id=?')
-    .run(name, Number(monthly_sales) || 0, Number(monthly_invoices) || 0, Number(monthly_coding) || 0,
-      JSON.stringify(Array.isArray(custom_items) ? custom_items : []), req.params.id);
+  const { name, monthly_sales, monthly_invoices, monthly_coding, custom_items, coding_target_pct } = req.body || {};
+  const pct = coding_target_pct === undefined || coding_target_pct === '' ? null : Math.min(100, Math.max(0, Number(coding_target_pct) || 0));
+  db.prepare(`UPDATE employees SET name=COALESCE(?, name), monthly_sales=COALESCE(?, monthly_sales), monthly_invoices=COALESCE(?, monthly_invoices), monthly_coding=COALESCE(?, monthly_coding), custom_items=COALESCE(?, custom_items), coding_target_pct=COALESCE(?, coding_target_pct) WHERE id=?`)
+    .run(name || null, monthly_sales === undefined ? null : Number(monthly_sales) || 0, monthly_invoices === undefined ? null : Number(monthly_invoices) || 0, monthly_coding === undefined ? null : Number(monthly_coding) || 0,
+      custom_items === undefined ? null : JSON.stringify(Array.isArray(custom_items) ? custom_items : []), pct, req.params.id);
   audit(me(req).username, 'update_employee', `تعديل موظف ${req.params.id}`);
   res.json({ ok: true });
 });
@@ -633,6 +636,48 @@ function prevMonthStr(m) {
   const d = new Date(y, mo - 2, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
+// Feature 3 — coding campaign: per-employee coded-invoice rate for today and
+// for the current week (Saturday..today), from the bills-sheet rows (date + employee + code).
+// "Today" is the real today when viewing the current month, else the month's last day.
+function codingDailyForMonth(month) {
+  const sheetRows = db.prepare("SELECT * FROM sheet_uploads WHERE type='sales' AND COALESCE(NULLIF(sheet_month,''), substr(created_at,1,7))=? ORDER BY id DESC").all(month);
+  const seen = new Set();
+  const byEmpDay = {}; // employee name -> date -> { total, coded }
+  for (const u of sheetRows) {
+    const key = `${u.type}|${u.filename}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    for (const row of JSON.parse(u.rows_json || '[]')) {
+      if (!row.date) continue;
+      const name = String(row.employee || '').trim();
+      if (!name) continue;
+      const d = byEmpDay[name] || (byEmpDay[name] = {});
+      const cell = d[row.date] || (d[row.date] = { total: 0, coded: 0 });
+      const n = Number(row.invoices || 0) || 1;
+      cell.total += n;
+      if (String(row.code || '').trim()) cell.coded += n;
+    }
+  }
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const { daysInMonth } = monthRange(month);
+  const monthEnd = `${month}-${String(daysInMonth).padStart(2, '0')}`;
+  const isCurrent = month === todayIso.slice(0, 7);
+  const todayDate = isCurrent ? todayIso : monthEnd;
+  let weekStart, weekEnd;
+  if (isCurrent) {
+    // This week: Saturday..today (Egyptian week starts Saturday).
+    const dow = new Date(todayDate + 'T00:00:00Z').getUTCDay(); // 0 Sun .. 6 Sat
+    const ws = new Date(todayDate + 'T00:00:00Z'); ws.setUTCDate(ws.getUTCDate() - ((dow + 1) % 7));
+    weekStart = ws.toISOString().slice(0, 10); weekEnd = todayDate;
+  } else {
+    // Past month: the last full Saturday..Friday week of the month.
+    const end = new Date(monthEnd + 'T00:00:00Z');
+    const fri = new Date(end); fri.setUTCDate(fri.getUTCDate() - ((end.getUTCDay() + 2) % 7));
+    const sat = new Date(fri); sat.setUTCDate(sat.getUTCDate() - 6);
+    weekStart = sat.toISOString().slice(0, 10); weekEnd = fri.toISOString().slice(0, 10);
+  }
+  return { byEmpDay, todayDate, weekStart, weekEnd };
+}
 app.get('/api/reports/summary', requireAuth, (req, res) => {
   const month = req.query.month || new Date().toISOString().slice(0, 7);
   const settings = getSettings();
@@ -675,6 +720,7 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
       target: { sales: e.monthly_sales, invoices: e.monthly_invoices, coding: e.monthly_coding },
       achieved: t, index: idx,
       classification: idx >= 90 ? 'ممتاز' : idx >= 80 ? 'جيد جدًا' : idx >= 70 ? 'على المسار الصحيح' : idx >= 50 ? 'يحتاج دعمًا' : 'متأخر',
+      codingTargetPct: e.coding_target_pct ?? 70,
       dailyRequired: { sales: Math.round(dailySales), invoices: Math.round(e.monthly_invoices / wdEmp), coding: Math.round(e.monthly_coding / wdEmp) },
       tomorrow: { sales: tomorrowSales },
       custom_items: JSON.parse(e.custom_items || '[]'),
@@ -771,6 +817,24 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
     };
   }).sort((a, b) => isPastMonth ? b.achieved.sales - a.achieved.sales : b.salesPct - a.salesPct)
     .map((r, i) => ({ ...r, rank: i + 1, rankBy: isPastMonth ? 'sales' : 'pct' }));
+  // Feature 3 — coding campaign (daily + weekly coded-invoice rate per employee).
+  const camp = codingDailyForMonth(month);
+  const rateOf = (c, t) => t ? Math.round(c / t * 1000) / 10 : 0;
+  const campaignRows = perEmployee.map(e => {
+    const days = camp.byEmpDay[e.name.trim()] || {};
+    let tc = 0, tt = 0, wc = 0, wt = 0;
+    for (const [d, cell] of Object.entries(days)) {
+      if (d === camp.todayDate) { tc += cell.coded; tt += cell.total; }
+      if (d >= camp.weekStart && d <= camp.weekEnd) { wc += cell.coded; wt += cell.total; }
+    }
+    return { id: e.id, name: e.name,
+      todayCoded: tc, todayTotal: tt, todayRate: rateOf(tc, tt),
+      weekCoded: wc, weekTotal: wt, weekRate: rateOf(wc, wt),
+      monthRate: e.achieved.codingRate || 0, target: e.codingTargetPct ?? 70 };
+  });
+  const campSums = campaignRows.reduce((a, r) => ({ tc: a.tc + r.todayCoded, tt: a.tt + r.todayTotal, wc: a.wc + r.weekCoded, wt: a.wt + r.weekTotal }), { tc: 0, tt: 0, wc: 0, wt: 0 });
+  const codingCampaign = { todayDate: camp.todayDate, weekStart: camp.weekStart, weekEnd: camp.weekEnd,
+    branchTodayRate: rateOf(campSums.tc, campSums.tt), branchWeekRate: rateOf(campSums.wc, campSums.wt), rows: campaignRows };
   const own = ownEmployeeId(req);
   if (req.session.user.role === 'employee' && own) {
     const mine = perEmployee.find(e => e.id === own);
@@ -778,9 +842,10 @@ app.get('/api/reports/summary', requireAuth, (req, res) => {
       totals: mine ? mine.achieved : { sales: 0, invoices: 0, coding: 0, delivery: 0, preferred: 0 },
       avgInvoice: 0, perEmployee: mine ? [mine] : [],
       problems: mine ? problems.filter(x => x.employee === mine.name) : [],
-      sheets: {}, leaderboard: [] });
+      sheets: {}, leaderboard: [],
+      codingCampaign: { ...codingCampaign, rows: mine ? codingCampaign.rows.filter(r => r.id === own) : [] } });
   }
-  res.json({ month, settings, workingDays: wd, totals, avgInvoice, perEmployee, problems, sheets, leaderboard });
+  res.json({ month, settings, workingDays: wd, totals, avgInvoice, perEmployee, problems, sheets, leaderboard, codingCampaign });
 });
 
 // Smart Performance Coach
