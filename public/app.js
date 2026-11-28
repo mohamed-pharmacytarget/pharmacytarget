@@ -667,8 +667,9 @@ async function renderCoach(v) {
   <p class="muted">المقارنة مع متوسط الفريق في الأسبوع ده: متوسط الفاتورة ${fmt(teamAvg.atv)} جنيه — نسبة التكويد ${teamAvg.codingRate}% — Preferred ${fmt(teamAvg.preferred)} جنيه — الفواتير ${teamAvg.invoices}. الـ Preferred هنا من التسجيل اليومي بس.</p>
   <h3>نظرة سريعة على الفريق</h3>
   <table><tr><th>الموظف</th><th>الفواتير</th><th>متوسط الفاتورة</th><th>التكويد</th><th>Preferred</th><th>أضعف نقطة</th><th></th></tr>
-  ${data.employees.map(e => `<tr><td>${e.name}</td><td>${e.invoices ? fmt(e.invoices) : '—'}</td><td>${e.invoices ? fmt(e.atv) + ' ج' : '—'}</td><td>${e.invoices ? e.codingRate + '%' : '—'}</td><td>${e.invoices ? fmt(e.preferred) + ' ج' : '—'}</td><td>${!e.hasData ? 'مفيش بيانات' : e.weakness ? e.weakness.label : '✅ ممتاز'}</td><td><button class="secondary" data-coach="${e.id}">عرض التقرير</button></td></tr>`).join('')}
+  ${data.employees.map(e => `<tr${e.id === coachEmpId ? ' style="background:#e8f2ff"' : ''}><td><b>${e.name}</b>${e.id === coachEmpId ? ' 👈 المختار' : ''}</td><td>${e.invoices ? fmt(e.invoices) : '—'}</td><td>${e.invoices ? fmt(e.atv) + ' ج' : '—'}</td><td>${e.invoices ? e.codingRate + '%' : '—'}</td><td>${e.invoices ? fmt(e.preferred) + ' ج' : '—'}</td><td>${!e.hasData ? 'مفيش بيانات' : e.weakness ? e.weakness.label : '✅ ممتاز'}</td><td><button class="secondary" data-coach="${e.id}">عرض التقرير</button></td></tr>`).join('')}
   </table>
+  <p class="muted">التقرير المفصّل تحت للموظف المختار — دوس «عرض التقرير» جنب أي اسم عشان تشوف تقريره.</p>
   ${r ? `<h3>تقرير ${r.name} — الأسبوع ${data.weekStart} → ${data.weekEnd}</h3>
   <div class="card" id="coach-report">
   <table><tr><th>المقياس</th><th>إنت</th><th>متوسط الفريق</th></tr>
@@ -687,7 +688,7 @@ async function renderCoach(v) {
   $('#coach-date').addEventListener('change', (e) => { coachDate = e.target.value; render(); });
   $('#coach-prev').addEventListener('click', () => { const d = new Date(coachDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 7); coachDate = d.toISOString().slice(0, 10); render(); });
   $('#coach-next').addEventListener('click', () => { const d = new Date(coachDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 7); coachDate = d.toISOString().slice(0, 10); render(); });
-  v.querySelectorAll('[data-coach]').forEach(b => b.addEventListener('click', () => { coachEmpId = Number(b.dataset.coach); render(); }));
+  v.querySelectorAll('[data-coach]').forEach(b => b.addEventListener('click', () => { coachEmpId = Number(b.dataset.coach); render().then(() => { const el = document.getElementById('coach-report'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }); }));
   const cp = $('#coach-copy'); if (cp) cp.addEventListener('click', async () => { try { await navigator.clipboard.writeText(txt); cp.textContent = 'تم النسخ ✓'; } catch (e) { cp.textContent = 'النسخ مش متاح'; } });
   const pr = $('#coach-print'); if (pr) pr.addEventListener('click', () => window.print());
 }
